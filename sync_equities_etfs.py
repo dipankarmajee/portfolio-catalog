@@ -1,16 +1,13 @@
 import os
 import sqlite3
-import io
-import requests
-import pandas as pd
+import math
 from datetime import datetime
+import requests
 import yfinance as yf
 
 DB_PATH = os.path.join("data", "master_equities_etfs.sqlite")
 os.makedirs("data", exist_ok=True)
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -32,6 +29,37 @@ def init_db():
     conn.commit()
     conn.close()
 
+def get_live_price(ticker_obj):
+    # Method 1: Try 1-month history (handles illiquid SGBs that didn't trade yesterday)
+    try:
+        hist = ticker_obj.history(period="1mo")
+        if not hist.empty:
+            valid_closes = hist["Close"].dropna()
+            if not valid_closes.empty:
+                val = float(valid_closes.iloc[-1])
+                if not math.isnan(val):
+                    return round(val, 2)
+    except Exception:
+        pass
+
+    # Method 2: Fallback to fast_info
+    try:
+        val = ticker_obj.fast_info.get("last_price")
+        if val is not None and not math.isnan(float(val)):
+            return round(float(val), 2)
+    except Exception:
+        pass
+
+    # Method 3: Fallback to previous close
+    try:
+        val = ticker_obj.fast_info.get("previous_close")
+        if val is not None and not math.isnan(float(val)):
+            return round(float(val), 2)
+    except Exception:
+        pass
+
+    return None
+
 def sync():
     init_db()
     print("[Markets] Ingesting Equities, ETFs, and SGBs...")
@@ -39,55 +67,30 @@ def sync():
     today_str = datetime.now().strftime("%d-%b-%Y")
     records = []
 
-    # 1. Official NSE Equities Directory
-    try:
-        url = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        if resp.status_code == 200:
-            df = pd.read_csv(io.StringIO(resp.text))
-            for _, row in df.iterrows():
-                sym = str(row["SYMBOL"]).strip()
-                name = str(row["NAME OF COMPANY"]).strip()
-                isin = str(row["ISIN NUMBER"]).strip()
-                records.append({
-                    "uid": f"STOCK_{sym}",
-                    "category": "STOCK",
-                    "name": name,
-                    "symbol_or_code": f"{sym}.NS",
-                    "isin": isin,
-                    "issuer": "NSE India",
-                    "latest_nav": None,
-                    "nav_date": today_str
-                })
-            print(f"[Markets] Parsed {len(records)} listed equities from NSE directory.")
-    except Exception as e:
-        print(f"[Markets] NSE Directory direct fetch fallback triggered: {e}")
+    # 1. Equities
+    equities = [
+        ("RELIANCE", "Reliance Industries Limited", "INE002A01018"),
+        ("TCS", "Tata Consultancy Services Limited", "INE467B01029"),
+        ("HDFCBANK", "HDFC Bank Limited", "INE040A01034"),
+        ("INFY", "Infosys Limited", "INE009A01021"),
+        ("TATAMOTORS", "Tata Motors Limited", "INE155A01022"),
+        ("ITC", "ITC Limited", "INE154A01025"),
+        ("ICICIBANK", "ICICI Bank Limited", "INE090A01021"),
+        ("SBIN", "State Bank of India", "INE062A01020")
+    ]
+    for sym, name, isin in equities:
+        records.append({
+            "uid": f"STOCK_{sym}",
+            "category": "STOCK",
+            "name": name,
+            "symbol_or_code": f"{sym}.NS",
+            "isin": isin,
+            "issuer": "NSE India",
+            "latest_nav": None,
+            "nav_date": today_str
+        })
 
-    # Fallback core bluechips if remote CSV blocks CI
-    if len(records) == 0:
-        core_equities = [
-            ("RELIANCE", "Reliance Industries Limited", "INE002A01018"),
-            ("TCS", "Tata Consultancy Services Limited", "INE467B01029"),
-            ("HDFCBANK", "HDFC Bank Limited", "INE040A01034"),
-            ("INFY", "Infosys Limited", "INE009A01021"),
-            ("TATAMOTORS", "Tata Motors Limited", "INE155A01022"),
-            ("ITC", "ITC Limited", "INE154A01025"),
-            ("ICICIBANK", "ICICI Bank Limited", "INE090A01021"),
-            ("SBIN", "State Bank of India", "INE062A01020")
-        ]
-        for sym, name, isin in core_equities:
-            records.append({
-                "uid": f"STOCK_{sym}",
-                "category": "STOCK",
-                "name": name,
-                "symbol_or_code": f"{sym}.NS",
-                "isin": isin,
-                "issuer": "NSE India",
-                "latest_nav": None,
-                "nav_date": today_str
-            })
-
-    # 2. Key ETFs
+    # 2. ETFs
     etf_list = [
         ("NIFTYBEES", "Nippon India Nifty 50 BeES ETF", "INF204KB14I2"),
         ("BANKBEES", "Nippon India Nifty Bank BeES ETF", "INF204KB14L6"),
@@ -107,7 +110,7 @@ def sync():
             "nav_date": today_str
         })
 
-    # 3. Sovereign Gold Bonds (Active Tranches)
+    # 3. Active SGBs
     sgb_list = [
         ("SGBMAY29", "Sovereign Gold Bond 2021-22 Series I", "IN0020210053"),
         ("SGBDE28", "Sovereign Gold Bond 2020-21 Series IX", "IN0020200377"),
@@ -126,19 +129,16 @@ def sync():
             "nav_date": today_str
         })
 
-    # 4. Fetch Closing Prices for Core / Monitored Instruments
-    symbols_to_price = [r["symbol_or_code"] for r in records if r["category"] in ("ETF", "SGB") or r["uid"] in ("STOCK_RELIANCE", "STOCK_TCS", "STOCK_TATAMOTORS")]
-    for sym in symbols_to_price:
+    # 4. Resolve Live Prices
+    for r in records:
+        sym = r["symbol_or_code"]
         try:
-            ticker = yf.Ticker(sym)
-            hist = ticker.history(period="5d")
-            if not hist.empty:
-                last_price = round(float(hist["Close"].iloc[-1]), 2)
-                for r in records:
-                    if r["symbol_or_code"] == sym:
-                        r["latest_nav"] = last_price
+            t = yf.Ticker(sym)
+            price = get_live_price(t)
+            if price is not None:
+                r["latest_nav"] = price
         except Exception as e:
-            print(f"Pricing notice for {sym}: {e}")
+            print(f"Notice: price fetch for {sym}: {e}")
 
     # 5. Database Upsert
     conn = sqlite3.connect(DB_PATH)
