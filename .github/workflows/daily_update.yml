@@ -24,15 +24,16 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run Master Ingestion Script
+      - name: Run Dedicated Ingestion Services
         run: |
           mkdir -p data
-          python update_master.py
+          python sync_mutual_funds.py
+          python sync_equities_etfs.py
+          python sync_insurers_ulips.py
 
       - name: Commit and Push Database Updates
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          git diff --staged --quiet || (git commit -m "chore: automated master catalog update" && git push)
-          
+          git diff --staged --quiet || (git commit -m "chore: automated catalog sync [$(date -u +'%Y-%m-%d %H:%M:%S')]" && git push)
