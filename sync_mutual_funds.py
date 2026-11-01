@@ -5,7 +5,7 @@ import requests
 
 DB_PATH = os.path.join("data", "master_mutual_funds.sqlite")
 os.makedirs("data", exist_ok=True)
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -29,7 +29,7 @@ def sync():
     init_db()
     print("[Mutual Funds] Fetching AMFI NAV feed...")
     url = "https://www.amfiindia.com/spages/NAVAll.txt"
-    resp = requests.get(url, headers=HEADERS, timeout=30)
+    resp = requests.get(url, headers=HEADERS, timeout=35)
     
     records = []
     for line in resp.text.splitlines():
@@ -74,7 +74,6 @@ def sync():
                 last_synced_at=excluded.last_synced_at
         """, params)
 
-    # Soft-delete: mark unlisted/removed schemes as DEACTIVATED
     cur.execute("SELECT uid FROM mutual_funds WHERE status = 'ACTIVE'")
     active_uids = {row[0] for row in cur.fetchall()}
     missing = active_uids - fetched_uids
