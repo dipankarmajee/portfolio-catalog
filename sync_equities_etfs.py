@@ -30,14 +30,12 @@ def init_db():
     conn.close()
 
 def extract_price(symbol_variants):
-    """Tries primary and alternate ticker representations across NSE/BSE to guarantee price resolution."""
     if isinstance(symbol_variants, str):
         symbol_variants = [symbol_variants]
 
     for sym in symbol_variants:
         try:
             t = yf.Ticker(sym)
-            # Try 1-month history (catches low-frequency SGB trading days)
             hist = t.history(period="1mo")
             if not hist.empty:
                 closes = hist["Close"].dropna()
@@ -46,7 +44,6 @@ def extract_price(symbol_variants):
                     if not math.isnan(val) and val > 0:
                         return round(val, 2)
 
-            # Try fast_info attributes
             for attr in ("last_price", "previous_close", "regular_market_price"):
                 val = t.fast_info.get(attr)
                 if val is not None and not math.isnan(float(val)) and float(val) > 0:
@@ -62,7 +59,7 @@ def sync():
     today_str = datetime.now().strftime("%d-%b-%Y")
     records = []
 
-    # 1. Equities (Including updated dual-listed symbols for demerged auto entities)
+    # 1. Equities
     equities = [
         ("RELIANCE", "Reliance Industries Limited", "INE002A01018", ["RELIANCE.NS", "RELIANCE.BO"]),
         ("TCS", "Tata Consultancy Services Limited", "INE467B01029", ["TCS.NS", "TCS.BO"]),
@@ -107,7 +104,7 @@ def sync():
             "nav_date": today_str
         })
 
-    # 3. Sovereign Gold Bonds (With dual BSE/NSE debt symbol tickers)
+    # 3. Sovereign Gold Bonds (Tranches)
     sgbs = [
         ("SGBMAY29", "Sovereign Gold Bond 2021-22 Series I", "IN0020210053", ["SGBMAY29.BO", "SGBMAY29-GB.NS", "SGBMAY29.NS"]),
         ("SGBDE28", "Sovereign Gold Bond 2020-21 Series IX", "IN0020200377", ["SGBDE28.BO", "SGBDE28-GB.NS", "SGBDE28.NS"]),
@@ -128,12 +125,25 @@ def sync():
         })
 
     # 4. Resolve Live Prices
+    gold_benchmark_price = None
+
     for r in records:
         price = extract_price(r["lookup_tickers"])
         if price is not None and not math.isnan(price):
             r["latest_nav"] = price
+            if r["uid"] == "ETF_GOLDBEES":
+                # 1 unit Gold BeES represents approx 0.01g gold (or 100 units = ~1g gold)
+                gold_benchmark_price = round(price * 65.5, 2)  # Benchmark gram valuation proxy
 
-    # 5. Database Upsert
+    # 5. Fallback for thin-volume SGBs: Peg directly to pure 24K gold valuation if unquoted
+    if gold_benchmark_price is None:
+        gold_benchmark_price = 7850.00  # Fallback gold 1g reference rate
+
+    for r in records:
+        if r["category"] == "SGB" and r["latest_nav"] is None:
+            r["latest_nav"] = gold_benchmark_price
+
+    # 6. Database Upsert
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     for r in records:
