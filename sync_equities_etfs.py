@@ -1,10 +1,16 @@
 import os
 import sqlite3
+import io
+import requests
+import pandas as pd
 from datetime import datetime
 import yfinance as yf
 
 DB_PATH = os.path.join("data", "master_equities_etfs.sqlite")
 os.makedirs("data", exist_ok=True)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -15,6 +21,7 @@ def init_db():
             category TEXT NOT NULL,
             name TEXT NOT NULL,
             symbol_or_code TEXT NOT NULL,
+            isin TEXT,
             issuer TEXT,
             latest_nav REAL,
             nav_date TEXT,
@@ -27,89 +34,132 @@ def init_db():
 
 def sync():
     init_db()
-    print("[Markets] Fetching Equities, ETFs, and SGBs...")
-    equities = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "TATAMOTORS.NS", "ITC.NS", "ICICIBANK.NS", "SBIN.NS"]
-    etfs = ["NIFTYBEES.NS", "BANKBEES.NS", "GOLDBEES.NS", "SILVERBEES.NS", "JUNIORBEES.NS"]
-    sgbs = ["SGBMAY29.NS", "SGBDE28.NS", "SGBJA29.NS", "SGBMR30.NS"]
-    
-    all_symbols = equities + etfs + sgbs
+    print("[Markets] Ingesting Equities, ETFs, and SGBs...")
+    now_iso = datetime.now().isoformat()
+    today_str = datetime.now().strftime("%d-%b-%Y")
     records = []
 
+    # 1. Official NSE Equities Directory
     try:
-        df = yf.download(all_symbols, period="5d", interval="1d", progress=False)
-        close_df = df["Close"]
-
-        for sym in all_symbols:
-            try:
-                if sym not in close_df.columns:
-                    continue
-                series = close_df[sym].dropna()
-                if series.empty:
-                    continue
-                price = float(series.iloc[-1])
-
-                if sym in equities:
-                    category = "STOCK"
-                    issuer = "NSE India"
-                elif sym in etfs:
-                    category = "ETF"
-                    issuer = "NSE India"
-                else:
-                    category = "SGB"
-                    issuer = "Reserve Bank of India"
-
-                clean_sym = sym.replace(".NS", "")
+        url = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code == 200:
+            df = pd.read_csv(io.StringIO(resp.text))
+            for _, row in df.iterrows():
+                sym = str(row["SYMBOL"]).strip()
+                name = str(row["NAME OF COMPANY"]).strip()
+                isin = str(row["ISIN NUMBER"]).strip()
                 records.append({
-                    "uid": f"{category}_{clean_sym}",
-                    "category": category,
-                    "name": sym,
-                    "symbol_or_code": sym,
-                    "issuer": issuer,
-                    "latest_nav": round(price, 2),
-                    "nav_date": datetime.now().strftime("%d-%b-%Y")
+                    "uid": f"STOCK_{sym}",
+                    "category": "STOCK",
+                    "name": name,
+                    "symbol_or_code": f"{sym}.NS",
+                    "isin": isin,
+                    "issuer": "NSE India",
+                    "latest_nav": None,
+                    "nav_date": today_str
                 })
-            except Exception as e:
-                print(f"Error parsing symbol {sym}: {e}")
+            print(f"[Markets] Parsed {len(records)} listed equities from NSE directory.")
     except Exception as e:
-        print(f"Market batch download error: {e}")
-        return
+        print(f"[Markets] NSE Directory direct fetch fallback triggered: {e}")
 
-    if not records:
-        print("[Markets] No records processed, skipping database write.")
-        return
+    # Fallback core bluechips if remote CSV blocks CI
+    if len(records) == 0:
+        core_equities = [
+            ("RELIANCE", "Reliance Industries Limited", "INE002A01018"),
+            ("TCS", "Tata Consultancy Services Limited", "INE467B01029"),
+            ("HDFCBANK", "HDFC Bank Limited", "INE040A01034"),
+            ("INFY", "Infosys Limited", "INE009A01021"),
+            ("TATAMOTORS", "Tata Motors Limited", "INE155A01022"),
+            ("ITC", "ITC Limited", "INE154A01025"),
+            ("ICICIBANK", "ICICI Bank Limited", "INE090A01021"),
+            ("SBIN", "State Bank of India", "INE062A01020")
+        ]
+        for sym, name, isin in core_equities:
+            records.append({
+                "uid": f"STOCK_{sym}",
+                "category": "STOCK",
+                "name": name,
+                "symbol_or_code": f"{sym}.NS",
+                "isin": isin,
+                "issuer": "NSE India",
+                "latest_nav": None,
+                "nav_date": today_str
+            })
 
+    # 2. Key ETFs
+    etf_list = [
+        ("NIFTYBEES", "Nippon India Nifty 50 BeES ETF", "INF204KB14I2"),
+        ("BANKBEES", "Nippon India Nifty Bank BeES ETF", "INF204KB14L6"),
+        ("GOLDBEES", "Nippon India ETF Gold BeES", "INF732E01037"),
+        ("SILVERBEES", "Nippon India Silver ETF", "INF204KB19R0"),
+        ("JUNIORBEES", "Nippon India Nifty Next 50 Junior BeES ETF", "INF204K01016")
+    ]
+    for sym, name, isin in etf_list:
+        records.append({
+            "uid": f"ETF_{sym}",
+            "category": "ETF",
+            "name": name,
+            "symbol_or_code": f"{sym}.NS",
+            "isin": isin,
+            "issuer": "NSE India",
+            "latest_nav": None,
+            "nav_date": today_str
+        })
+
+    # 3. Sovereign Gold Bonds (Active Tranches)
+    sgb_list = [
+        ("SGBMAY29", "Sovereign Gold Bond 2021-22 Series I", "IN0020210053"),
+        ("SGBDE28", "Sovereign Gold Bond 2020-21 Series IX", "IN0020200377"),
+        ("SGBJA29", "Sovereign Gold Bond 2020-21 Series X", "IN0020200385"),
+        ("SGBMR30", "Sovereign Gold Bond 2021-22 Series X", "IN0020210210")
+    ]
+    for sym, name, isin in sgb_list:
+        records.append({
+            "uid": f"SGB_{sym}",
+            "category": "SGB",
+            "name": name,
+            "symbol_or_code": f"{sym}.NS",
+            "isin": isin,
+            "issuer": "Reserve Bank of India",
+            "latest_nav": None,
+            "nav_date": today_str
+        })
+
+    # 4. Fetch Closing Prices for Core / Monitored Instruments
+    symbols_to_price = [r["symbol_or_code"] for r in records if r["category"] in ("ETF", "SGB") or r["uid"] in ("STOCK_RELIANCE", "STOCK_TCS", "STOCK_TATAMOTORS")]
+    for sym in symbols_to_price:
+        try:
+            ticker = yf.Ticker(sym)
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                last_price = round(float(hist["Close"].iloc[-1]), 2)
+                for r in records:
+                    if r["symbol_or_code"] == sym:
+                        r["latest_nav"] = last_price
+        except Exception as e:
+            print(f"Pricing notice for {sym}: {e}")
+
+    # 5. Database Upsert
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    now_iso = datetime.now().isoformat()
-    fetched_uids = set()
-
     for r in records:
-        fetched_uids.add(r["uid"])
-        params = (r["uid"], r["category"], r["name"], r["symbol_or_code"], r["issuer"], r["latest_nav"], r["nav_date"], now_iso)
+        params = (r["uid"], r["category"], r["name"], r["symbol_or_code"], r.get("isin"), r["issuer"], r["latest_nav"], r["nav_date"], now_iso)
         cur.execute("""
-            INSERT INTO market_instruments (uid, category, name, symbol_or_code, issuer, latest_nav, nav_date, status, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
+            INSERT INTO market_instruments (uid, category, name, symbol_or_code, isin, issuer, latest_nav, nav_date, status, last_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
             ON CONFLICT(uid) DO UPDATE SET
                 name=excluded.name,
-                latest_nav=excluded.latest_nav,
+                isin=excluded.isin,
+                latest_nav=coalesce(excluded.latest_nav, market_instruments.latest_nav),
                 nav_date=excluded.nav_date,
                 status='ACTIVE',
                 last_synced_at=excluded.last_synced_at
         """, params)
 
-    cur.execute("SELECT uid FROM market_instruments WHERE status = 'ACTIVE'")
-    active_uids = {row[0] for row in cur.fetchall()}
-    missing = active_uids - fetched_uids
-    if missing:
-        cur.executemany(
-            "UPDATE market_instruments SET status = 'DEACTIVATED', last_synced_at = ? WHERE uid = ?",
-            [(now_iso, uid) for uid in missing]
-        )
-        print(f"[Markets] Deactivated {len(missing)} missing instruments.")
-
     conn.commit()
     conn.close()
-    print(f"[Markets] Upserted {len(records)} market records.")
+    print(f"[Markets] Completed upsert for {len(records)} records.")
 
 if __name__ == "__main__":
     sync()
