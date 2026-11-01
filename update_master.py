@@ -44,6 +44,16 @@ def upsert_records(records, category):
     for r in records:
         uid = r["uid"]
         fetched_uids.add(uid)
+        params = (
+            uid,
+            r["category"],
+            r["name"],
+            r["symbol_or_code"],
+            r.get("issuer"),
+            r.get("latest_nav"),
+            r.get("nav_date"),
+            now_iso
+        )
         cur.execute("""
             INSERT INTO master_assets (uid, category, name, symbol_or_code, issuer, latest_nav, nav_date, status, last_synced_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
@@ -53,26 +63,15 @@ def upsert_records(records, category):
                 nav_date=excluded.nav_date,
                 status='ACTIVE',
                 last_synced_at=excluded.last_synced_at
-        """, (
-            uid,
-            r["category"],
-            r["name"],
-            r["symbol_or_code"],
-            r.get("issuer"),
-            r.get("latest_nav"),
-            r.get("nav_date"),
-            now_iso
-        ))
+        """, params)
 
     cur.execute("SELECT uid FROM master_assets WHERE category = ? AND status = 'ACTIVE'", (category,))
     current_active_db_uids = {row[0] for row in cur.fetchall()}
     missing_uids = current_active_db_uids - fetched_uids
 
     if missing_uids:
-        cur.executemany(
-            "UPDATE master_assets SET status = 'DEACTIVATED', last_synced_at = ? WHERE uid = ?",
-            [(now_iso, uid) for uid in missing_uids]
-        )
+        deact_params = [(now_iso, uid) for uid in missing_uids]
+        cur.executemany("UPDATE master_assets SET status = 'DEACTIVATED', last_synced_at = ? WHERE uid = ?", deact_params)
         print(f"[{category}] Marked {len(missing_uids)} records as DEACTIVATED.")
 
     conn.commit()
@@ -166,52 +165,18 @@ if __name__ == "__main__":
     print(f"=== Starting Master Catalog Ingestion: {datetime.now()} ===")
     init_db()
 
-    # 1. Update Mutual Funds
     mf_data = fetch_mutual_funds()
     upsert_records(mf_data, "MUTUAL_FUND")
 
-    # 2. Update Equities & ETFs
     market_data = fetch_equities_and_etfs()
     upsert_records(market_data, "STOCK")
     upsert_records([r for r in market_data if r["category"] == "ETF"], "ETF")
 
-    # 3. Update Insurer Master List
     insurer_data = fetch_ulip_insurers()
     upsert_records(insurer_data, "INSURER")
 
     print(f"=== Master Catalog Ingestion Complete ===")
-                    r.get("nav_date"),
-                                                                                                                                                                                                                                                                                                                                                                                                                                                    now_iso
-                                                                                                                                                                                                                                                                                                                                                                                                                                                            ))
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                cur.execute("SELECT uid FROM master_assets WHERE category = ? AND status = 'ACTIVE'", (category,))
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                    current_active_db_uids = {row[0] for row in cur.fetchall()}
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                        missing_uids = current_active_db_uids - fetched_uids
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                            if missing_uids:
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    cur.executemany(
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                "UPDATE master_assets SET status = 'DEACTIVATED', last_synced_at = ? WHERE uid = ?",
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            [(now_iso, uid) for uid in missing_uids]
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    )
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            print(f"[{category}] Marked {len(missing_uids)} records as DEACTIVATED.")
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                conn.commit()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    conn.close()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        print(f"[{category}] Upserted {len(records)} active records.")
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        def fetch_mutual_funds():
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            print("[Mutual Funds] Downloading AMFI feed...")
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                url = "https://www.amfiindia.com/spages/NAVAll.txt"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    resp = requests.get(url, headers=HEADERS, timeout=25)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        records = []
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            for line in resp.text.splitlines():
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    line = line.strip()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            if not line or ";" not in line or line.startswith("Scheme Code"):
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        continue
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                cols = [c.strip() for c in line.split(";")]
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        if len(cols) >= 6:
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    code = cols[0]
+    code = cols[0]
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 name = cols[3]
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             try:
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             nav = float(cols[4])
