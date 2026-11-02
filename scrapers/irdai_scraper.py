@@ -1,6 +1,7 @@
 """
 Module: scrapers.irdai_scraper
 Purpose: 100% Dynamic crawler discovering and extracting all IRDAI regulated entities across all pages.
+Excludes table header rows, redundant portal routes, and invalid entities.
 """
 
 import logging
@@ -39,6 +40,7 @@ class SSLHonorAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 def sanitize_english_text(raw_text: str) -> str:
+    """Extracts and normalizes English text from mixed Hindi-English cells."""
     cleaned = " ".join(raw_text.split()).strip()
     english_segments = re.findall(r"[A-Za-z0-9\s\.\,\-\(\)\&\/\:\@]+", cleaned)
     candidate = " ".join(" ".join(english_segments).split()).strip()
@@ -52,6 +54,10 @@ def clean_company_name(name_raw: str) -> str:
     return cleaned
 
 def discover_regulated_entity_sections(session: requests.Session) -> Dict[str, str]:
+    """
+    100% Dynamic discovery: Scrapes all child links under Regulated Entities
+    from the portal navigation. Zero hardcoded dictionary defaults.
+    """
     logger.info("Discovering Regulated Entities sections dynamically from %s...", SEED_URL)
     sections: Dict[str, str] = {}
     
@@ -82,23 +88,30 @@ def discover_regulated_entity_sections(session: requests.Session) -> Dict[str, s
     return sections
 
 def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[Dict[str, str]]:
+    """Extracts entities from tables on a single page, skipping table header rows."""
     entities = []
     tables = soup.find_all("table")
 
     for table in tables:
         for tr in table.find_all("tr"):
+            # Skip if the entire row consists of <th> elements
+            if tr.find_all("th") and not tr.find_all("td"):
+                continue
+
             cells = tr.find_all(["td", "th"])
             if len(cells) < 2:
                 continue
 
             cell_texts = [" ".join(c.get_text().split()).strip() for c in cells]
             
+            # Detect statutory registration number
             reg_candidate = None
             for txt in cell_texts:
                 if re.match(r"^\d{1,4}$", txt) and 0 < int(txt) < 1000:
                     reg_candidate = txt
                     break
 
+            # Detect company name
             name_candidate = None
             for txt in cell_texts:
                 eng = clean_company_name(txt)
@@ -114,27 +127,39 @@ def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[
                 if non_num_candidates:
                     name_candidate = non_num_candidates[0]
 
+            if not name_candidate:
+                continue
+
+            # Explicitly reject table header text captured by fallback
+            lower_name = name_candidate.lower()
+            if any(h in lower_name for h in ["regn. no", "regn no", "sl. no", "sl no", "name of insurer", "name of the insurer", "registration no", "company name"]):
+                continue
+
             website_url = ""
             for a in tr.find_all("a", href=True):
                 if a["href"].startswith("http"):
                     website_url = a["href"].strip()
                     break
 
-            if name_candidate:
-                clean_reg = reg_candidate if reg_candidate else re.sub(r"[^A-Za-z0-9]", "", name_candidate)[:10].upper()
-                entities.append({
-                    "entity_id": f"ENT_{clean_reg}",
-                    "entity_name": name_candidate,
-                    "reg_number": clean_reg,
-                    "category": category,
-                    "website": website_url,
-                    "source_url": page_url,
-                    "status": "ACTIVE"
-                })
+            clean_reg = reg_candidate if reg_candidate else re.sub(r"[^A-Za-z0-9]", "", name_candidate)[:10].upper()
+            
+            if clean_reg.lower() in {"regnno", "slno", "sno", "regno"}:
+                continue
+
+            entities.append({
+                "entity_id": f"ENT_{clean_reg}",
+                "entity_name": name_candidate,
+                "reg_number": clean_reg,
+                "category": category,
+                "website": website_url,
+                "source_url": page_url,
+                "status": "ACTIVE"
+            })
 
     return entities
 
 def scrape_all_regulated_entities() -> List[Dict[str, str]]:
+    """Crawls all discovered categories across all pages."""
     session = requests.Session()
     session.mount("https://", SSLHonorAdapter())
     session.headers.update(HEADERS)
@@ -179,6 +204,7 @@ def scrape_all_regulated_entities() -> List[Dict[str, str]]:
     return list(all_discovered.values())
 
 def scrape_registered_life_insurers() -> List[Dict[str, str]]:
+    """Compatibility adapter for sync_insurers_ulips.py returning Life Insurers."""
     all_entities = scrape_all_regulated_entities()
     life_insurers = [
         {
