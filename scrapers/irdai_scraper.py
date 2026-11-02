@@ -54,45 +54,40 @@ def clean_company_name(name_raw: str) -> str:
 
 def discover_regulated_entity_sections(session: requests.Session) -> Dict[str, str]:
     """
-    Discovers all entity sections dynamically from the portal menu.
-    Falls back to known standard endpoints if navigation tags vary.
+    100% Dynamic discovery: Scrapes all child links under Regulated Entities
+    from the portal navigation. Zero hardcoded dictionary defaults.
     """
-    logger.info("Discovering Regulated Entities sections from %s...", SEED_URL)
+    logger.info("Discovering Regulated Entities sections dynamically from %s...", SEED_URL)
     sections: Dict[str, str] = {}
-    try:
-        resp = session.get(SEED_URL, timeout=REQUEST_TIMEOUT)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Discover links inside 'Regulated Entities' dropdowns or sidebars
-            for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
-                text = " ".join(a.get_text().split()).strip()
-                parent_text = a.parent.get_text() if a.parent else ""
-                
-                if any(k in href for k in ["-insurers", "reinsurer", "broker", "corporate-agent", "telemarketer"]) \
-                   and not href.startswith("javascript:") and len(text) > 3:
-                    full_url = urljoin(BASE_PORTAL_URL, href)
-                    cat_key = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").upper()
-                    sections[cat_key] = full_url
+    
+    resp = session.get(SEED_URL, timeout=REQUEST_TIMEOUT)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to access seed URL {SEED_URL} (HTTP {resp.status_code})")
 
-    except Exception as e:
-        logger.warning("Dynamic menu discovery exception: %s", e)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    
+    # Extract links that represent directory listings under Regulated Entities
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        text = " ".join(a.get_text().split()).strip()
+        
+        # Match entity links and skip informational guidelines / javascript links
+        is_entity_href = any(k in href for k in ["-insurers", "reinsurer", "broker", "corporate-agent", "telemarketer"])
+        is_informational = any(k in href for k in ["about-", "requirements-", "lapsed-", "guidelines"])
+        
+        if is_entity_href and not is_informational and not href.startswith("javascript:") and len(text) > 3:
+            full_url = urljoin(BASE_PORTAL_URL, href)
+            cat_key = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").upper()
+            
+            # Keep unique categories and avoid duplicate URLs
+            if cat_key not in sections and full_url not in sections.values():
+                sections[cat_key] = full_url
 
-    # Core base routes fallback ensuring zero critical sections are omitted
-    base_defaults = {
-        "LIFE_INSURERS": "https://irdai.gov.in/life-insurers1",
-        "NON_LIFE_INSURERS": "https://irdai.gov.in/non-life-insurers1",
-        "HEALTH_INSURERS": "https://irdai.gov.in/health-insurers1",
-        "REINSURERS": "https://irdai.gov.in/reinsurers",
-        "REINSURANCE_BRANCHES": "https://irdai.gov.in/reinsurance-branches",
-        "BROKERS": "https://irdai.gov.in/brokers",
-        "CORPORATE_AGENTS": "https://irdai.gov.in/list-of-corporate-agents"
-    }
-    for k, v in base_defaults.items():
-        if k not in sections:
-            sections[k] = v
+    logger.info("Dynamically discovered %d distinct entity sections: %s", len(sections), list(sections.keys()))
+    
+    if not sections:
+        raise RuntimeError("Dynamic menu discovery completed but found 0 entity sections.")
 
-    logger.info("Total categories to crawl: %d (%s)", len(sections), list(sections.keys()))
     return sections
 
 def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[Dict[str, str]]:
@@ -187,8 +182,7 @@ def scrape_all_regulated_entities() -> List[Dict[str, str]]:
                 logger.info("Category %s [Page %d]: Extracted %d entities (%d new).", cat_name, page_idx + 1, len(page_entities), new_count)
 
                 if new_count == 0:
-                    consecutive_empty += 1
-                    if consecutive_empty >= 2:
+                    logger.info("Page %d yielded 0 new entities. Moving to next category.", page_idx + 1)
                         break
                 else:
                     consecutive_empty = 0
