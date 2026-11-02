@@ -4,6 +4,7 @@ sync_insurers_ulips.py
 Syncs Life Insurers and ULIP Funds into data/master_insurers_ulips.sqlite.
 Maintains historical time-series pricing, computes price statistics (High, Low, Avg),
 and enriches funds with commercial umbrella product names and UIN codes.
+Auto-creates database directories and tables if they do not exist.
 """
 
 import logging
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 STOPWORDS = {
     "company", "co", "limited", "ltd", "pvt", "private",
     "corporation", "corp", "insurance", "life", "of", "india",
-    "services", "ins", "general", "assurance"
+    "services", "ins", "general", "assurance",
 }
 
 
@@ -88,6 +89,20 @@ def ensure_schema(conn: sqlite3.Connection):
     """Establishes tables and schema migrations for ULIP funds and analytics."""
     cursor = conn.cursor()
 
+    # Ensure parent table exists so foreign keys do not fail
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS master_insurers (
+            insurer_id TEXT PRIMARY KEY,
+            insurer_name TEXT NOT NULL,
+            reg_number TEXT,
+            category TEXT DEFAULT 'LIST_OF_LIFE_INSURERS',
+            website TEXT,
+            source_url TEXT,
+            status TEXT DEFAULT 'ACTIVE',
+            updated_at TEXT
+        )
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS master_ulip_funds (
             sfin TEXT PRIMARY KEY,
@@ -121,7 +136,7 @@ def ensure_schema(conn: sqlite3.Connection):
         )
     """)
 
-    # Dynamic column migrations if table already existed previously
+    # Dynamic column migrations if table already existed
     cursor.execute("PRAGMA table_info(master_ulip_funds)")
     existing_cols = {row[1] for row in cursor.fetchall()}
     columns_to_verify = [
@@ -147,7 +162,6 @@ def compute_and_update_price_analytics(conn: sqlite3.Connection):
     """Calculates High, Low, and Average prices from historical observations."""
     cursor = conn.cursor()
 
-    # Calculate metrics from the historical series
     cursor.execute("""
         SELECT 
             sfin,
@@ -172,7 +186,6 @@ def compute_and_update_price_analytics(conn: sqlite3.Connection):
             WHERE sfin = ?
         """, [(r[1], r[2], r[3], r[1], r[2], r[0]) for r in stats_rows])
     else:
-        # Fallback if history table is new: baseline metrics match latest_nav
         cursor.execute("""
             UPDATE master_ulip_funds
             SET nav_all_time_high = latest_nav,
@@ -214,12 +227,23 @@ def enrich_commercial_names(conn: sqlite3.Connection):
 
 
 def sync_ulip_funds():
-    if not DB_PATH.exists():
-        raise FileNotFoundError(f"Database not found at {DB_PATH}")
+    # 1. Automatically create parent directory if it does not exist
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+    # 2. Connect and automatically initialize schema if file is created fresh
     conn = sqlite3.connect(DB_PATH)
     ensure_schema(conn)
     cursor = conn.cursor()
+
+    # 3. If master_insurers is empty, seed it via sync_irdai if present
+    cursor.execute("SELECT COUNT(*) FROM master_insurers")
+    if cursor.fetchone()[0] == 0:
+        logger.info("master_insurers table is empty. Attempting statutory insurer initialization...")
+        try:
+            from sync_irdai import sync_insurers
+            sync_insurers(conn)
+        except ImportError:
+            logger.warning("sync_irdai not found; proceeding with existing schema.")
 
     cursor.execute("SELECT insurer_id, insurer_name FROM master_insurers")
     raw_insurers = cursor.fetchall()
