@@ -1,7 +1,7 @@
 """
 Module: scrapers.irdai_scraper
-Purpose: Resilient live scraper for statutory Life Insurers directory.
-Targets active Life Insurance Council & IRDAI endpoints.
+Purpose: Robust live scraper for IRDAI life insurers directory.
+Handles Drupal table layouts, nested anchors, and formatted registration numbers.
 """
 
 import logging
@@ -20,13 +20,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-# Multi-endpoint discovery list covering verified public regulatory paths
-TARGET_ENDPOINTS = [
-    "https://www.lifeinscouncil.org/industry_info/members_details.aspx",
-    "https://www.lifeinscouncil.org/industry_info/member_details.aspx",
-    "https://www.lifeinscouncil.org/industry_info/",
-    "https://irdai.gov.in/life-insurers"
-]
+IRDAI_LIVE_URL = "https://irdai.gov.in/life-insurers"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -36,74 +30,93 @@ HEADERS = {
 }
 
 class SSLHonorAdapter(HTTPAdapter):
-    """Bypasses legacy TLS/cipher negotiation strictness on cloud runners."""
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context()
         ctx.load_default_certs()
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
+def clean_company_name(name_raw: str) -> str:
+    cleaned = re.sub(r"\s+", " ", name_raw).strip()
+    # Strip common trailing contact info if present
+    for separator in ["Tel:", "Phone:", "Email:", "Address:", "Fax:"]:
+        if separator in cleaned:
+            cleaned = cleaned.split(separator)[0].strip()
+    return cleaned
+
 def scrape_registered_life_insurers() -> List[Dict[str, str]]:
+    logger.info("Connecting to official IRDAI directory: %s", IRDAI_LIVE_URL)
     session = requests.Session()
     session.mount("https://", SSLHonorAdapter())
     session.headers.update(HEADERS)
 
-    for url in TARGET_ENDPOINTS:
-        logger.info("Attempting scrape from statutory endpoint: %s", url)
-        try:
-            resp = session.get(url, timeout=25)
-            logger.info("HTTP Status: %d | Length: %d bytes", resp.status_code, len(resp.content))
-            if resp.status_code != 200 or len(resp.content) < 1000:
-                continue
+    resp = session.get(IRDAI_LIVE_URL, timeout=30)
+    logger.info("HTTP Status: %d | Response Length: %d bytes", resp.status_code, len(resp.content))
+    resp.raise_for_status()
 
-            soup = BeautifulSoup(resp.text, "html.parser")
-            insurers: Dict[str, Dict[str, str]] = {}
+    soup = BeautifulSoup(resp.text, "html.parser")
+    insurers: Dict[str, Dict[str, str]] = {}
 
-            # Strategy A: Extract from standard HTML table grids
-            for tr in soup.find_all("tr"):
-                cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
-                if len(cols) >= 2:
-                    for idx, val in enumerate(cols):
-                        # Detect statutory IRDAI Registration Numbers (typically 101 to 600)
-                        if val.isdigit() and 100 <= int(val) <= 600:
-                            reg_num = val
-                            # Locate the corresponding corporation name in the remaining columns
-                            name_candidates = [c for i, c in enumerate(cols) if i != idx and len(c) > 6 and not c.isdigit()]
-                            if name_candidates:
-                                raw_name = name_candidates[0]
-                                clean_name = " ".join(raw_name.split())
-                                insurers[reg_num] = {
-                                    "insurer_id": f"INS_{reg_num}",
-                                    "insurer_name": clean_name,
-                                    "reg_number": reg_num,
-                                    "status": "ACTIVE"
-                                }
-                            break
+    # Extraction Strategy 1: Standard Table / Grid Inspection
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all(["td", "th"])
+        if len(cells) < 2:
+            continue
 
-            # Strategy B: If table parsing yielded few results, extract from detail links/anchors
-            if len(insurers) < 15:
-                for a in soup.find_all("a", href=True):
-                    href = a["href"]
-                    text = a.get_text(strip=True)
-                    # Often links are structured like: members_details.aspx?id=101 or contains company names
-                    match = re.search(r"[?&]id=(\d{3})", href, re.IGNORECASE)
-                    if match and len(text) > 4:
-                        reg_num = match.group(1)
-                        if 100 <= int(reg_num) <= 600:
-                            insurers[reg_num] = {
-                                "insurer_id": f"INS_{reg_num}",
-                                "insurer_name": text,
-                                "reg_number": reg_num,
-                                "status": "ACTIVE"
-                            }
+        cell_texts = [re.sub(r"\s+", " ", c.get_text(strip=True)) for c in cells]
 
-            if len(insurers) >= 15:
-                logger.info("Successfully extracted %d insurers from %s", len(insurers), url)
-                return list(insurers.values())
-            else:
-                logger.warning("Endpoint %s yielded only %d valid records; trying next source.", url, len(insurers))
+        # Search for registration number (either clean digits or 'Reg No: 101')
+        detected_reg = None
+        detected_name = None
 
-        except Exception as exc:
-            logger.warning("Error querying %s: %s", url, exc)
+        for text in cell_texts:
+            # Match 3-digit registration number (IRDAI life insurers range from 101 to 512+)
+            reg_match = re.search(r"\b(1\d\d|[2-5]\d\d)\b", text)
+            if reg_match:
+                detected_reg = reg_match.group(1)
+                break
 
-    raise RuntimeError("All statutory insurer endpoints failed or returned 0 rows.")
+        if detected_reg:
+            # Candidate names are columns longer than 6 chars that are not pure dates or pure numbers
+            name_candidates = [
+                c for c in cell_texts 
+                if len(c) > 6 and not re.match(r"^[\d\s\-\/\.]+$", c) and "Date" not in c
+            ]
+            if name_candidates:
+                detected_name = clean_company_name(name_candidates[0])
+
+        if detected_reg and detected_name:
+            insurers[detected_reg] = {
+                "insurer_id": f"INS_{detected_reg}",
+                "insurer_name": detected_name,
+                "reg_number": detected_reg,
+                "status": "ACTIVE"
+            }
+
+    # Extraction Strategy 2: Drupal Views Row Wrapper fallback
+    if len(insurers) < 10:
+        logger.info("Table extraction returned %d entities; scanning Drupal views rows...", len(insurers))
+        for row_div in soup.find_all(["div", "li"], class_=re.compile(r"(views-row|item-list|insurer)")):
+            text_block = row_div.get_text(separator=" ", strip=True)
+            reg_match = re.search(r"(?:Reg(?:istration)?\.?\s*(?:No\.?)?[:\s]*)?\b(1\d\d|[2-5]\d\d)\b", text_block, re.IGNORECASE)
+            
+            # Find company title anchor inside row
+            anchor = row_div.find("a")
+            anchor_text = anchor.get_text(strip=True) if anchor else None
+
+            if reg_match and anchor_text and len(anchor_text) > 6:
+                reg_num = reg_match.group(1)
+                insurers[reg_num] = {
+                    "insurer_id": f"INS_{reg_num}",
+                    "insurer_name": clean_company_name(anchor_text),
+                    "reg_number": reg_num,
+                    "status": "ACTIVE"
+                }
+
+    logger.info("Total unique insurers extracted from IRDAI: %d", len(insurers))
+    if not insurers:
+        snippet = re.sub(r"\s+", " ", soup.get_text()[:400])
+        logger.error("Failed to parse IRDAI response. Text preview: %s", snippet)
+        raise RuntimeError("IRDAI returned 200, but regex patterns extracted 0 insurer rows.")
+
+    return list(insurers.values())
