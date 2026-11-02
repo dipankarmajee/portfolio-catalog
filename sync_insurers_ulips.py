@@ -1,9 +1,7 @@
 """
 Service: sync_insurers_ulips.py
 Purpose: Ingests life insurers and ULIP catalogs into SQLite.
-Architecture:
-  - Scraper logic delegated to scrapers/irdai_scraper.py
-  - Fallback is strictly optional and only engaged upon scraper failure
+Pattern: Dynamic fetch first -> Optional fallback on failure -> Graceful exit.
 """
 
 import os
@@ -83,9 +81,9 @@ def init_db(conn: sqlite3.Connection):
         """, all_docs)
 
 def load_optional_fallback() -> Tuple[List[Dict], List[Dict]]:
-    """Loads fallback entities if the config file exists and contains valid JSON."""
+    """Loads fallback data if the file exists and is valid; otherwise returns empty lists."""
     if not os.path.exists(FALLBACK_PATH):
-        logging.info("Optional fallback file %s not present.", FALLBACK_PATH)
+        logging.info("Optional fallback file %s not present. Skipping fallback check.", FALLBACK_PATH)
         return [], []
     try:
         with open(FALLBACK_PATH, "r", encoding="utf-8") as f:
@@ -97,28 +95,29 @@ def load_optional_fallback() -> Tuple[List[Dict], List[Dict]]:
         logging.warning("Fallback file %s could not be loaded: %s. Continuing with empty set.", FALLBACK_PATH, e)
         return [], []
 
-def get_insurers_data() -> Tuple[List[Dict], List[Dict]]:
-    """Tries dynamic scraper first; falls back to optional JSON only on failure."""
-    try:
-        live_insurers = scrape_registered_life_insurers()
-        return live_insurers, []
-    except Exception as err:
-        logging.error("Live IRDAI scraper failed: %s. Checking optional fallback...", err)
-        fallback_insurers, fallback_funds = load_optional_fallback()
-        if fallback_insurers:
-            logging.info("Engaging fallback: loaded %d insurers from %s.", len(fallback_insurers), FALLBACK_PATH)
-            return fallback_insurers, fallback_funds
-        logging.warning("No fallback insurers available. Sync will skip table update.")
-        return [], []
-
 def sync():
     os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
-    insurers, ulip_funds = get_insurers_data()
+    insurers: List[Dict] = []
+    ulip_funds: List[Dict] = []
+
+    # Step 1: Live fetch
+    try:
+        insurers = scrape_registered_life_insurers()
+        logging.info("Dynamic scrape succeeded: %d insurers gathered.", len(insurers))
+    except Exception as e:
+        logging.error("Dynamic scrape failed: %s. Checking optional fallback...", e)
+        insurers, ulip_funds = load_optional_fallback()
+        if insurers:
+            logging.info("Using fallback data: %d insurers loaded.", len(insurers))
+        else:
+            logging.warning("No fallback data available. Table master_insurers will remain unchanged.")
+
     now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
 
+    # Step 2: Ingest insurers if available
     if insurers:
         rows = [
             (
@@ -141,6 +140,7 @@ def sync():
             """, rows)
         logging.info("Updated %d insurer records in database.", len(rows))
 
+    # Step 3: Ingest ULIP funds if available (from optional fallback)
     if ulip_funds:
         fund_rows = [
             (
@@ -166,7 +166,7 @@ def sync():
                     status=excluded.status,
                     updated_at=excluded.updated_at
             """, fund_rows)
-        logging.info("Updated %d ULIP fund records from fallback.", len(fund_rows))
+        logging.info("Updated %d ULIP fund records.", len(fund_rows))
 
     conn.close()
 

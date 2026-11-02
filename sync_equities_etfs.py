@@ -1,7 +1,7 @@
 """
 Service: sync_equities_etfs.py
-Source: Official BSE Listed Securities Directory API (api.bseindia.com)
-Resilience: Attempts dynamic BSE API fetch first; uses config/fallbacks_equities.json only upon failure.
+Source: Official BSE Listed Securities Directory (api.bseindia.com)
+Pattern: Dynamic fetch first -> Optional fallback on failure -> Graceful exit.
 """
 
 import os
@@ -9,7 +9,7 @@ import json
 import sqlite3
 import logging
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict
 import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -23,7 +23,10 @@ BSE_LIST_URL = "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.bseindia.com/"
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.bseindia.com",
+    "Referer": "https://www.bseindia.com/",
+    "Connection": "keep-alive"
 }
 
 SCHEMA_DOCS = [
@@ -80,7 +83,16 @@ def init_db(conn: sqlite3.Connection):
 
 def fetch_live_bse_catalog() -> List[Dict]:
     logging.info("Querying live BSE security directory API...")
-    resp = requests.get(BSE_LIST_URL, headers=HEADERS, timeout=30)
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # Establish cookie context on main domain
+    try:
+        session.get("https://www.bseindia.com", timeout=15)
+    except Exception:
+        pass
+
+    resp = session.get(BSE_LIST_URL, timeout=30)
     resp.raise_for_status()
     data = resp.json()
 
@@ -117,6 +129,7 @@ def fetch_live_bse_catalog() -> List[Dict]:
     return records
 
 def load_optional_fallback() -> List[Dict]:
+    """Loads fallback equities if available; otherwise returns an empty list."""
     if not os.path.exists(FALLBACK_PATH):
         logging.info("Optional fallback file %s not found.", FALLBACK_PATH)
         return []
@@ -125,7 +138,7 @@ def load_optional_fallback() -> List[Dict]:
             data = json.load(f)
             return data if isinstance(data, list) else []
     except Exception as e:
-        logging.warning("Failed loading fallback file %s: %s.", FALLBACK_PATH, e)
+        logging.warning("Failed loading fallback file %s: %s", FALLBACK_PATH, e)
         return []
 
 def sync():
@@ -133,17 +146,21 @@ def sync():
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
+    records: List[Dict] = []
+
+    # Step 1: Live fetch
     try:
         records = fetch_live_bse_catalog()
-        logging.info("Retrieved %d active securities from live BSE API.", len(records))
+        logging.info("Dynamic BSE fetch succeeded: %d securities gathered.", len(records))
     except Exception as e:
         logging.error("Live BSE fetch failed: %s. Checking optional fallback...", e)
         records = load_optional_fallback()
         if records:
-            logging.info("Engaging fallback: loaded %d securities from %s.", len(records), FALLBACK_PATH)
+            logging.info("Using fallback data: %d securities loaded.", len(records))
         else:
-            logging.warning("No fallback records found. Database unchanged.")
+            logging.warning("No fallback records found. Database will remain unchanged.")
 
+    # Step 2: Ingest records if available
     if records:
         now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
         upsert_rows = [
