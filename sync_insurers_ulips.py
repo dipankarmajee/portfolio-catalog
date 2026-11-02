@@ -1,227 +1,320 @@
 """
-Service: sync_insurers_ulips.py
-Purpose: Ingests all IRDAI regulated entities, life insurers, and ULIP SFIN funds into SQLite.
+sync_insurers_ulips.py
+
+Syncs Life Insurers and ULIP Funds into data/master_insurers_ulips.sqlite.
+Maintains historical time-series pricing, computes price statistics (High, Low, Avg),
+and enriches funds with commercial umbrella product names and UIN codes.
 """
 
-import os
-import sys
-import sqlite3
 import logging
-from datetime import datetime
-from typing import List, Dict
+import re
+import sqlite3
+from datetime import datetime, timezone
+from difflib import SequenceMatcher
+from pathlib import Path
+from typing import Dict, Optional
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] [SYNC_ENTITIES] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+from scrapers.life_council_scraper import LifeCouncilScraper
+from scrapers.commercial_plan_scraper import CommercialPlanScraper
 
-from scrapers.irdai_scraper import scrape_all_regulated_entities
-from scrapers.life_council_scraper import scrape_all_ulip_funds
+DB_PATH = Path("data/master_insurers_ulips.sqlite")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data", "master_insurers_ulips.sqlite")
+STOPWORDS = {
+    "company", "co", "limited", "ltd", "pvt", "private",
+    "corporation", "corp", "insurance", "life", "of", "india",
+    "services", "ins", "general", "assurance"
+}
 
-REGULATED_ENTITIES_DOCS = [
-    ("entity_id", "TEXT", 1, "Unique primary key: ENT_{reg_number}"),
-    ("entity_name", "TEXT", 0, "Registered entity corporate description"),
-    ("reg_number", "TEXT", 0, "Statutory registration or license number"),
-    ("category", "TEXT", 0, "IRDAI regulatory sector classification"),
-    ("website", "TEXT", 0, "Official public web portal URL"),
-    ("source_url", "TEXT", 0, "Source IRDAI directory registry endpoint"),
-    ("status", "TEXT", 0, "Regulatory status (ACTIVE)"),
-    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
-]
 
-INSURERS_DOCS = [
-    ("insurer_id", "TEXT", 1, "Unique primary key: INS_{reg_number}"),
-    ("insurer_name", "TEXT", 0, "Registered life insurance corporation name"),
-    ("reg_number", "TEXT", 0, "Official statutory registration number"),
-    ("category", "TEXT", 0, "Statutory class (LIFE_INSURERS)"),
-    ("website", "TEXT", 0, "Official corporate portal URL"),
-    ("source_url", "TEXT", 0, "Source IRDAI registry endpoint"),
-    ("status", "TEXT", 0, "Regulatory status (ACTIVE)"),
-    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
-]
+def clean_corporate_name(text: str) -> str:
+    """Standardizes insurer corporate names for resilient token comparison."""
+    if not text:
+        return ""
 
-ULIP_DOCS = [
-    ("sfin", "TEXT", 1, "16-character Segregated Fund Identification Number"),
-    ("fund_name", "TEXT", 0, "Official public fund name"),
-    ("insurer_id", "TEXT", 0, "Foreign key -> master_insurers.insurer_id"),
-    ("inception_date", "TEXT", 0, "Launch date (YYYY-MM-DD)"),
-    ("latest_nav", "REAL", 0, "Latest closing NAV per unit"),
-    ("nav_date", "TEXT", 0, "Valuation date (YYYY-MM-DD)"),
-    ("status", "TEXT", 0, "Fund status (ACTIVE / CLOSED)"),
-    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
-]
+    if re.search(r"\blife\s+insurance\s+corporation\b|\blic\b", text, re.I):
+        return "lic"
 
-def init_db(conn: sqlite3.Connection):
-    with conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS master_regulated_entities (
-                entity_id TEXT PRIMARY KEY,
-                entity_name TEXT NOT NULL,
-                reg_number TEXT NOT NULL,
-                category TEXT NOT NULL,
-                website TEXT,
-                source_url TEXT,
-                status TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(category, reg_number, entity_name)
-            )
+    text = re.sub(r"\(.*?\)", " ", text.lower())
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = sorted([t for t in text.split() if t not in STOPWORDS and len(t) > 1])
+    return " ".join(tokens)
+
+
+def match_insurer_id(scraped_name: str, insurer_registry: Dict[str, str]) -> Optional[str]:
+    """Matches scraped portal names to statutory master_insurers.insurer_id."""
+    clean_target = clean_corporate_name(scraped_name)
+    if not clean_target:
+        return None
+
+    if clean_target in insurer_registry:
+        return insurer_registry[clean_target]
+
+    target_tokens = set(clean_target.split())
+    best_id = None
+    best_overlap = 0.0
+
+    for norm_name, ins_id in insurer_registry.items():
+        if not norm_name:
+            continue
+        reg_tokens = set(norm_name.split())
+
+        if reg_tokens.issubset(target_tokens) or target_tokens.issubset(reg_tokens):
+            return ins_id
+
+        intersection = target_tokens.intersection(reg_tokens)
+        union = target_tokens.union(reg_tokens)
+        overlap = len(intersection) / len(union) if union else 0.0
+
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_id = ins_id
+
+    if best_overlap >= 0.50:
+        return best_id
+
+    best_score = 0.0
+    for norm_name, ins_id in insurer_registry.items():
+        score = SequenceMatcher(None, clean_target, norm_name).ratio()
+        if score > best_score:
+            best_score = score
+            best_id = ins_id
+
+    return best_id if best_score >= 0.60 else None
+
+
+def ensure_schema(conn: sqlite3.Connection):
+    """Establishes tables and schema migrations for ULIP funds and analytics."""
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS master_ulip_funds (
+            sfin TEXT PRIMARY KEY,
+            fund_name TEXT,
+            commercial_product_name TEXT,
+            uin TEXT,
+            inception_date TEXT,
+            insurer_id TEXT NOT NULL,
+            latest_nav REAL,
+            nav_date TEXT,
+            nav_52w_high REAL,
+            nav_52w_low REAL,
+            nav_all_time_high REAL,
+            nav_all_time_low REAL,
+            nav_avg REAL,
+            status TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (insurer_id) REFERENCES master_insurers(insurer_id)
+        )
+    """)
+
+    # Historical NAV time-series log
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ulip_nav_history (
+            sfin TEXT NOT NULL,
+            nav_date TEXT NOT NULL,
+            nav REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (sfin, nav_date),
+            FOREIGN KEY (sfin) REFERENCES master_ulip_funds(sfin)
+        )
+    """)
+
+    # Dynamic column migrations if table already existed previously
+    cursor.execute("PRAGMA table_info(master_ulip_funds)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    columns_to_verify = [
+        ("commercial_product_name", "TEXT"),
+        ("uin", "TEXT"),
+        ("nav_52w_high", "REAL"),
+        ("nav_52w_low", "REAL"),
+        ("nav_all_time_high", "REAL"),
+        ("nav_all_time_low", "REAL"),
+        ("nav_avg", "REAL"),
+    ]
+    for col_name, col_type in columns_to_verify:
+        if col_name not in existing_cols:
+            cursor.execute(f"ALTER TABLE master_ulip_funds ADD COLUMN {col_name} {col_type}")
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ulip_insurer ON master_ulip_funds(insurer_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ulip_nav_date ON master_ulip_funds(nav_date)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ulip_hist_sfin ON ulip_nav_history(sfin)")
+    conn.commit()
+
+
+def compute_and_update_price_analytics(conn: sqlite3.Connection):
+    """Calculates High, Low, and Average prices from historical observations."""
+    cursor = conn.cursor()
+
+    # Calculate metrics from the historical series
+    cursor.execute("""
+        SELECT 
+            sfin,
+            MAX(nav) AS max_nav,
+            MIN(nav) AS min_nav,
+            AVG(nav) AS mean_nav
+        FROM ulip_nav_history
+        WHERE nav IS NOT NULL AND nav > 0
+        GROUP BY sfin
+    """)
+    stats_rows = cursor.fetchall()
+
+    if stats_rows:
+        logger.info(f"Computing historical price metrics for {len(stats_rows)} funds...")
+        cursor.executemany("""
+            UPDATE master_ulip_funds
+            SET nav_all_time_high = round(?, 4),
+                nav_all_time_low = round(?, 4),
+                nav_avg = round(?, 4),
+                nav_52w_high = round(?, 4),
+                nav_52w_low = round(?, 4)
+            WHERE sfin = ?
+        """, [(r[1], r[2], r[3], r[1], r[2], r[0]) for r in stats_rows])
+    else:
+        # Fallback if history table is new: baseline metrics match latest_nav
+        cursor.execute("""
+            UPDATE master_ulip_funds
+            SET nav_all_time_high = latest_nav,
+                nav_all_time_low = latest_nav,
+                nav_avg = latest_nav,
+                nav_52w_high = latest_nav,
+                nav_52w_low = latest_nav
+            WHERE latest_nav IS NOT NULL AND nav_avg IS NULL
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS master_insurers (
-                insurer_id TEXT PRIMARY KEY,
-                insurer_name TEXT NOT NULL,
-                reg_number TEXT NOT NULL UNIQUE,
-                category TEXT NOT NULL DEFAULT 'LIFE_INSURERS',
-                website TEXT,
-                source_url TEXT,
-                status TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS master_ulip_funds (
-                sfin TEXT PRIMARY KEY,
-                fund_name TEXT NOT NULL,
-                insurer_id TEXT NOT NULL,
-                inception_date TEXT,
-                latest_nav REAL,
-                nav_date TEXT,
-                status TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (insurer_id) REFERENCES master_insurers(insurer_id)
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS _schema_documentation (
-                table_name TEXT NOT NULL,
-                column_name TEXT NOT NULL,
-                data_type TEXT NOT NULL,
-                is_primary_key INTEGER NOT NULL,
-                description TEXT NOT NULL,
-                PRIMARY KEY (table_name, column_name)
-            )
-        """)
 
-        all_docs = [('master_regulated_entities', *d) for d in REGULATED_ENTITIES_DOCS] + \
-                   [('master_insurers', *d) for d in INSURERS_DOCS] + \
-                   [('master_ulip_funds', *d) for d in ULIP_DOCS]
-        conn.executemany("""
-            INSERT OR REPLACE INTO _schema_documentation 
-            (table_name, column_name, data_type, is_primary_key, description)
-            VALUES (?, ?, ?, ?, ?)
-        """, all_docs)
+    conn.commit()
 
-def sync():
-    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+
+def enrich_commercial_names(conn: sqlite3.Connection):
+    """Enriches funds with commercial umbrella names and IRDAI UINs."""
+    cursor = conn.cursor()
+    commercial_scraper = CommercialPlanScraper()
+    mappings = commercial_scraper.fetch_dynamic_insurer_mappings()
+
+    logger.info(f"Applying commercial product mappings ({len(mappings)} entries)...")
+    for item in mappings:
+        sfin = item.get("sfin")
+        prod_name = item.get("product_name")
+        uin = item.get("uin")
+
+        if sfin and prod_name:
+            cursor.execute("""
+                UPDATE master_ulip_funds
+                SET commercial_product_name = CASE 
+                        WHEN commercial_product_name IS NULL OR commercial_product_name = '' THEN ?
+                        WHEN instr(commercial_product_name, ?) > 0 THEN commercial_product_name
+                        ELSE commercial_product_name || ' / ' || ?
+                    END,
+                    uin = coalesce(uin, ?)
+                WHERE sfin = ?
+            """, (prod_name, prod_name, prod_name, uin, sfin))
+
+    conn.commit()
+
+
+def sync_ulip_funds():
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at {DB_PATH}")
+
     conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
+    ensure_schema(conn)
+    cursor = conn.cursor()
 
-    now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+    cursor.execute("SELECT insurer_id, insurer_name FROM master_insurers")
+    raw_insurers = cursor.fetchall()
+    insurer_registry: Dict[str, str] = {
+        clean_corporate_name(name): ins_id for ins_id, name in raw_insurers
+    }
 
-    # 1. Scrape all regulated entities dynamically
-    all_entities: List[Dict] = []
-    try:
-        all_entities = scrape_all_regulated_entities()
-        logging.info("Dynamic scrape succeeded: %d total entities collected.", len(all_entities))
-    except Exception as exc:
-        logging.error("Failed to scrape regulated entities: %s", exc)
+    scraper = LifeCouncilScraper()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
-    deduped_life_insurers: List[Dict] = []
+    upsert_fund_sql = """
+        INSERT INTO master_ulip_funds (
+            sfin, fund_name, inception_date, insurer_id, latest_nav, nav_date, status, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sfin) DO UPDATE SET
+            fund_name = excluded.fund_name,
+            inception_date = coalesce(excluded.inception_date, master_ulip_funds.inception_date),
+            insurer_id = excluded.insurer_id,
+            latest_nav = excluded.latest_nav,
+            nav_date = excluded.nav_date,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+    """
 
-    if all_entities:
-        entity_rows = [
-            (
-                e["entity_id"],
-                e["entity_name"],
-                str(e["reg_number"]),
-                e["category"],
-                e.get("website", ""),
-                e.get("source_url", ""),
-                e.get("status", "ACTIVE"),
-                now_iso
+    insert_history_sql = """
+        INSERT OR IGNORE INTO ulip_nav_history (sfin, nav_date, nav, created_at)
+        VALUES (?, ?, ?, ?)
+    """
+
+    records_batch = []
+    history_batch = []
+    total_processed = 0
+
+    for fund in scraper.scrape_all_funds():
+        ins_name_raw = fund["insurer_name_raw"]
+        ins_id = match_insurer_id(ins_name_raw, insurer_registry)
+
+        if not ins_id:
+            logger.warning(
+                f"Could not map insurer '{ins_name_raw}' to master_insurers. Skipping SFIN {fund['sfin']}."
             )
-            for e in all_entities
-        ]
-        with conn:
-            conn.execute("DELETE FROM master_regulated_entities")
-            conn.executemany("""
-                INSERT OR REPLACE INTO master_regulated_entities 
-                (entity_id, entity_name, reg_number, category, website, source_url, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, entity_rows)
-        logging.info("Saved %d total regulated entities to master_regulated_entities.", len(entity_rows))
+            continue
 
-        # Filter and deduplicate Life Insurers
-        life_insurers_map: Dict[str, Dict] = {}
-        for e in all_entities:
-            if "LIFE" in e["category"] and "NON_LIFE" not in e["category"]:
-                reg = str(e["reg_number"]).strip()
-                if reg not in life_insurers_map or (reg.isdigit() and not life_insurers_map[reg]["reg_number"].isdigit()):
-                    life_insurers_map[reg] = e
+        sfin = fund["sfin"]
+        nav = fund["latest_nav"]
+        nav_date = fund["nav_date"]
 
-        deduped_life_insurers = list(life_insurers_map.values())
-        logging.info("Deduplicated to %d unique Life Insurers.", len(deduped_life_insurers))
+        records_batch.append((
+            sfin,
+            fund["fund_name"],
+            fund["inception_date"],
+            ins_id,
+            nav,
+            nav_date,
+            fund["status"],
+            now_iso,
+        ))
 
-        insurer_rows = [
-            (
-                f"INS_{i['reg_number']}",
-                i["entity_name"],
-                str(i["reg_number"]),
-                i["category"],
-                i.get("website", ""),
-                i.get("source_url", ""),
-                i.get("status", "ACTIVE"),
-                now_iso
-            )
-            for i in deduped_life_insurers
-        ]
+        if nav and nav_date:
+            history_batch.append((sfin, nav_date, nav, now_iso))
 
-        with conn:
-            conn.execute("DELETE FROM master_insurers")
-            conn.executemany("""
-                INSERT OR REPLACE INTO master_insurers 
-                (insurer_id, insurer_name, reg_number, category, website, source_url, status, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, insurer_rows)
-        logging.info("Successfully refreshed master_insurers with %d verified Life Insurers.", len(insurer_rows))
+        if len(records_batch) >= 100:
+            cursor.executemany(upsert_fund_sql, records_batch)
+            cursor.executemany(insert_history_sql, history_batch)
+            conn.commit()
+            total_processed += len(records_batch)
+            records_batch.clear()
+            history_batch.clear()
 
-    # 2. Dynamic ULIP SFIN Ingestion
-    if deduped_life_insurers:
-        ulip_funds: List[Dict] = []
-        try:
-            ulip_funds = scrape_all_ulip_funds(deduped_life_insurers)
-        except Exception as exc:
-            logging.error("Failed to scrape ULIP SFIN funds: %s", exc)
+    if records_batch:
+        cursor.executemany(upsert_fund_sql, records_batch)
+        cursor.executemany(insert_history_sql, history_batch)
+        conn.commit()
+        total_processed += len(records_batch)
 
-        if ulip_funds:
-            fund_rows = [
-                (
-                    f["sfin"],
-                    f["fund_name"],
-                    f["insurer_id"],
-                    f.get("inception_date", None),
-                    f["latest_nav"],
-                    f["nav_date"],
-                    f.get("status", "ACTIVE"),
-                    now_iso
-                )
-                for f in ulip_funds
-            ]
-            with conn:
-                conn.executemany("""
-                    INSERT OR REPLACE INTO master_ulip_funds 
-                    (sfin, fund_name, insurer_id, inception_date, latest_nav, nav_date, status, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, fund_rows)
-            logging.info("Successfully synced %d ULIP funds to master_ulip_funds.", len(fund_rows))
-        else:
-            logging.info("ULIP crawler finished. No new ULIP SFIN records returned for this date cycle.")
+    # Enrich with commercial names & calculate price stats
+    enrich_commercial_names(conn)
+    compute_and_update_price_analytics(conn)
+
+    cursor.execute("""
+        SELECT 
+            COUNT(*), 
+            COUNT(commercial_product_name), 
+            COUNT(nav_avg)
+        FROM master_ulip_funds
+    """)
+    total_funds, with_commercial, with_stats = cursor.fetchone()
+
+    logger.info(
+        f"ULIP Sync complete. Processed: {total_funds} funds | "
+        f"Commercial Plans Mapped: {with_commercial} | Analytics Populated: {with_stats}"
+    )
 
     conn.close()
 
+
 if __name__ == "__main__":
-    sync()
+    sync_ulip_funds()

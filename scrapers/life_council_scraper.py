@@ -1,315 +1,265 @@
 """
-Module: scrapers.life_council_scraper
-Purpose: 100% Dynamic crawler for Life Insurance Council ASP.NET NAV portal.
-Maintains full ASP.NET ViewState lifecycle and extracts SFIN fund NAV records.
+scrapers/life_council_scraper.py
+
+Automated dynamic extractor for Indian ULIP Fund NAVs from the
+Life Insurance Council ASP.NET portal.
 """
 
 import logging
-import sys
 import re
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
-from urllib.parse import urljoin, quote, urlparse
-import requests
+from typing import Dict, Generator, List, Optional, Tuple
+from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
-from urllib3.util import create_urllib3_context
+from dateutil import parser as date_parser
+import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-logger = logging.getLogger("scrapers.life_council")
-if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [COUNCIL_ULIP] %(message)s"))
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-BASE_COUNCIL_URL = "https://www.lifeinscouncil.org"
-REQUEST_TIMEOUT = 30
+PORTAL_URL = "https://www.lifeinscouncil.org/industry%20information/list_of_fund_NAVs.aspx"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Origin": "https://www.lifeinscouncil.org",
+    "Referer": PORTAL_URL,
 }
 
-class SSLHonorAdapter(HTTPAdapter):
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = create_urllib3_context()
-        ctx.load_default_certs()
-        kwargs["ssl_context"] = ctx
-        return super().init_poolmanager(*args, **kwargs)
 
-def get_session() -> requests.Session:
-    session = requests.Session()
-    session.mount("https://", SSLHonorAdapter())
-    session.headers.update(HEADERS)
-    return session
+class LifeCouncilScraper:
+    def __init__(self, session: Optional[requests.Session] = None):
+        self.session = session or requests.Session()
+        retries = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=[429, 500, 502, 503, 504],
+            raise_on_status=False,
+        )
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        self.session.headers.update(HEADERS)
 
-def clean_text(raw_text: str) -> str:
-    return " ".join(raw_text.split()).strip()
+    @staticmethod
+    def _extract_aspnet_tokens(soup: BeautifulSoup) -> Dict[str, str]:
+        tokens = {}
+        for inp in soup.find_all("input", type="hidden"):
+            name = inp.get("name") or inp.get("id")
+            if name:
+                tokens[name] = inp.get("value", "")
+        return tokens
 
-def normalize_url(raw_url: str) -> str:
-    """Properly encodes spaces and special characters in ASP.NET paths."""
-    parts = urlparse(raw_url)
-    encoded_path = quote(parts.path)
-    return f"{parts.scheme}://{parts.netloc}{encoded_path}"
+    @staticmethod
+    def _clean_sfin(val: str) -> str:
+        if not val:
+            return ""
+        # Preserve alphanumeric characters and statutory SFIN symbols (+, -, _)
+        return re.sub(r"[^A-Za-z0-9+_-]", "", val.strip()).upper()
 
-def discover_nav_portal_url(session: requests.Session) -> Optional[str]:
-    """Dynamically locates the NAV portal link from navigation."""
-    logger.info("Discovering live NAV portal URL dynamically from %s...", BASE_COUNCIL_URL)
-    try:
-        resp = session.get(BASE_COUNCIL_URL, timeout=REQUEST_TIMEOUT)
-        if resp.status_code != 200:
+    @staticmethod
+    def _clean_nav(raw_nav: Optional[str]) -> Optional[float]:
+        if not raw_nav:
+            return None
+        cleaned = re.sub(r"[^\d.]", "", raw_nav.strip())
+        if not cleaned:
+            return None
+        try:
+            val = float(cleaned)
+            return val if val > 0.0 else None
+        except ValueError:
             return None
 
+    @staticmethod
+    def _parse_iso_date(raw_date: Optional[str]) -> Optional[str]:
+        if not raw_date:
+            return None
+        raw_date = raw_date.strip()
+        if not raw_date or raw_date.lower() in ("na", "n/a", "-", "--", "null"):
+            return None
+        try:
+            return date_parser.parse(raw_date, dayfirst=True).strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return None
+
+    def get_initial_page(self) -> Tuple[BeautifulSoup, str, Dict[str, str]]:
+        resp = self.session.get(PORTAL_URL, timeout=30)
+        resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-        candidates = []
-        for a in soup.find_all("a", href=True):
-            href = a["href"].strip()
-            text = clean_text(a.get_text()).lower()
-            lower_href = href.lower()
+        form = soup.find("form")
+        post_url = urljoin(PORTAL_URL, form.get("action", "")) if form else PORTAL_URL
+        return soup, post_url, self._extract_aspnet_tokens(soup)
 
-            if any(k in text for k in ["nav", "ulip", "sfin", "fund"]) or any(k in lower_href for k in ["nav", "fund_nav"]):
-                if not href.startswith("javascript:") and not href.startswith("#"):
-                    full_link = urljoin(BASE_COUNCIL_URL, href)
-                    candidates.append(full_link)
+    def discover_insurers(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
+        select_tag = soup.find("select", id=re.compile(r"drpselectins|company", re.I)) or soup.find("select")
+        if not select_tag:
+            return []
+        insurers = []
+        for opt in select_tag.find_all("option"):
+            val = opt.get("value", "").strip()
+            label = opt.get_text(strip=True)
+            if not val or val in ("0", "-1") or re.search(r"select|choose", label, re.I):
+                continue
+            insurers.append({"value": val, "name": label})
+        return insurers
 
-        if candidates:
-            # Prefer direct fund NAV pages
-            for c in candidates:
-                if "fund_nav" in c.lower() or "list_of_fund" in c.lower():
-                    return normalize_url(c)
-            return normalize_url(candidates[0])
+    def _open_calendar_and_get_days(
+        self, soup: BeautifulSoup, post_url: str, ins_val: str
+    ) -> Tuple[BeautifulSoup, List[Tuple[str, str]]]:
+        tokens = self._extract_aspnet_tokens(soup)
+        payload = {
+            **tokens,
+            "ctl00$txtusername": "",
+            "ctl00$txtpwd": "",
+            "ctl00$MainContent$drpselectinscompany": ins_val,
+            "ctl00$MainContent$imgbtncalender.x": "10",
+            "ctl00$MainContent$imgbtncalender.y": "10",
+        }
+        resp = self.session.post(post_url, data=payload, timeout=30)
+        soup_cal = BeautifulSoup(resp.text, "html.parser")
 
-    except Exception as exc:
-        logger.warning("Dynamic menu discovery exception: %s", exc)
+        cal = soup_cal.find(lambda t: t.name == "table" and "cal" in t.get("id", "").lower())
+        if not cal:
+            return soup_cal, []
 
-    return None
+        day_options = []
+        for a in cal.find_all("a"):
+            href = a.get("href", "")
+            # Filter out month navigation links ('V' prefix) and keep date postbacks
+            if "CALnavdate" in href and ",'V" not in href:
+                m = re.search(r"'([^']+)'\)", href)
+                if m:
+                    day_options.append((a.get_text(strip=True), m.group(1)))
+        return soup_cal, day_options
 
-def extract_aspnet_state(soup: BeautifulSoup) -> Dict[str, str]:
-    """Extracts all required ASP.NET hidden state inputs."""
-    state = {}
-    for inp in soup.find_all("input", {"type": "hidden"}):
-        name = inp.get("name")
-        val = inp.get("value", "")
-        if name:
-            state[name] = val
-    return state
+    def _parse_table(self, soup: BeautifulSoup, insurer_name: str) -> List[Dict]:
+        funds = []
+        grid = soup.find(lambda t: t.name == "table" and "gridview" in t.get("id", "").lower())
+        candidates = [grid] if grid else [t for t in soup.find_all("table") if len(t.find_all("tr")) > 2]
 
-def parse_ulip_table(soup: BeautifulSoup, default_reg: str = "UNKNOWN") -> List[Dict]:
-    """
-    Scans all HTML tables for IRDAI SFIN patterns, fund descriptions, and NAV values.
-    """
-    funds = []
-    tables = soup.find_all("table")
-    sfin_pattern = re.compile(r"\b(ULI[FP][A-Z0-9\/\-]{8,25}|[A-Z]{3,4}\d{2,6}[A-Z0-9\/\-]{6,16})\b", re.IGNORECASE)
+        if not candidates or not candidates[0]:
+            return []
 
-    for table in tables:
-        for tr in table.find_all("tr"):
-            cells = tr.find_all(["td", "th"])
-            if len(cells) < 2:
+        rows = candidates[0].find_all("tr")
+        if len(rows) < 2:
+            return []
+
+        headers = [c.get_text(" ", strip=True).lower() for c in rows[0].find_all(["th", "td"])]
+        idx_map = {}
+        for i, h in enumerate(headers):
+            if "sfin" in h:
+                idx_map["sfin"] = i
+            elif "fund" in h or "name" in h:
+                idx_map["fund_name"] = i
+            elif "per unit" in h or ("nav" in h and "date" not in h):
+                idx_map["latest_nav"] = i
+            elif "date" in h:
+                idx_map["nav_date"] = i
+
+        # Fallbacks based on portal layout: ['Sr.no.', 'SFIN', 'Segregated Fund Name', 'NAV Date', 'NAV Per Unit']
+        if "sfin" not in idx_map:
+            idx_map["sfin"] = 1
+        if "fund_name" not in idx_map:
+            idx_map["fund_name"] = 2
+        if "nav_date" not in idx_map:
+            idx_map["nav_date"] = 3
+        if "latest_nav" not in idx_map:
+            idx_map["latest_nav"] = 4
+
+        for row in rows[1:]:
+            cells = [td.get_text(" ", strip=True) for td in row.find_all("td")]
+            if not cells or len(cells) <= max(idx_map.values()):
                 continue
 
-            row_texts = [clean_text(c.get_text()) for c in cells]
-
-            # 1. Search for SFIN
-            sfin_candidate = None
-            for txt in row_texts:
-                match = sfin_pattern.search(txt)
-                if match:
-                    sfin_candidate = match.group(1).upper()
-                    break
-
-            if not sfin_candidate:
+            raw_sfin = self._clean_sfin(cells[idx_map["sfin"]])
+            if not raw_sfin or len(raw_sfin) < 5 or raw_sfin == "SFIN":
                 continue
 
-            # 2. Search for NAV
-            nav_candidate = None
-            for txt in reversed(row_texts):
-                cleaned_num = re.sub(r"[^\d\.]", "", txt)
-                if cleaned_num and "." in cleaned_num:
-                    try:
-                        val = float(cleaned_num)
-                        if 1.0 <= val <= 100000.0:
-                            nav_candidate = val
-                            break
-                    except ValueError:
-                        pass
+            fund_name = cells[idx_map["fund_name"]].strip()
+            latest_nav = self._clean_nav(cells[idx_map["latest_nav"]])
+            nav_date = self._parse_iso_date(cells[idx_map["nav_date"]])
 
-            # 3. Search for Fund Name
-            name_candidate = None
-            for txt in row_texts:
-                if txt != sfin_candidate and len(txt) > 5 and not re.match(r"^[\d\.\-\/\s]+$", txt):
-                    if not any(header_word in txt.lower() for header_word in ["sfin", "nav", "fund name", "date"]):
-                        name_candidate = txt
+            funds.append({
+                "sfin": raw_sfin,
+                "fund_name": fund_name,
+                "insurer_name_raw": insurer_name,
+                "latest_nav": latest_nav,
+                "nav_date": nav_date,
+                "inception_date": None,
+                "status": "ACTIVE" if latest_nav is not None else "CLOSED",
+            })
+        return funds
+
+    def scrape_all_funds(self) -> Generator[Dict, None, None]:
+        init_soup, post_url, _ = self.get_initial_page()
+        insurers = self.discover_insurers(init_soup)
+        logger.info(f"Discovered {len(insurers)} insurers dynamically from portal.")
+
+        for ins in insurers:
+            ins_name = ins["name"]
+            ins_val = ins["value"]
+            logger.info(f"Querying ULIP funds for: {ins_name} ({ins_val})")
+
+            found_funds = []
+            try:
+                # 1. Start with fresh base tokens for each insurer
+                s_base, post_url, _ = self.get_initial_page()
+
+                # 2. Open Calendar
+                s_cal, days = self._open_calendar_and_get_days(s_base, post_url, ins_val)
+                if not days:
+                    logger.warning(f"No calendar days visible for {ins_name}")
+                    continue
+
+                # 3. Test days in reverse chronological order (skip holidays/weekends dynamically)
+                for day_txt, day_arg in reversed(days):
+                    tokens_cal = self._extract_aspnet_tokens(s_cal)
+                    payload_sel = {
+                        **tokens_cal,
+                        "__EVENTTARGET": "ctl00$MainContent$CALnavdate",
+                        "__EVENTARGUMENT": day_arg,
+                        "ctl00$txtusername": "",
+                        "ctl00$txtpwd": "",
+                        "ctl00$MainContent$drpselectinscompany": ins_val,
+                    }
+                    r_sel = self.session.post(post_url, data=payload_sel, timeout=30)
+                    s_sel = BeautifulSoup(r_sel.text, "html.parser")
+
+                    tokens_sel = self._extract_aspnet_tokens(s_sel)
+                    txt_el = s_sel.find("input", id=lambda x: x and "txtdateselect" in x.lower())
+                    txt_val = txt_el.get("value", "") if txt_el else ""
+
+                    # 4. Click "Get Data"
+                    payload_get = {
+                        **tokens_sel,
+                        "ctl00$txtusername": "",
+                        "ctl00$txtpwd": "",
+                        "ctl00$MainContent$drpselectinscompany": ins_val,
+                        "ctl00$MainContent$txtdateselect": txt_val,
+                        "ctl00$MainContent$btngetdetails": "Get Data",
+                    }
+                    r_data = self.session.post(post_url, data=payload_get, timeout=30)
+                    if "not been uploaded" in r_data.text:
+                        continue
+
+                    s_data = BeautifulSoup(r_data.text, "html.parser")
+                    funds = self._parse_table(s_data, ins_name)
+                    if funds:
+                        found_funds = funds
+                        logger.info(
+                            f"Successfully scraped {len(funds)} funds for {ins_name} on date '{txt_val}'."
+                        )
                         break
 
-            # 4. Search for Valuation Date
-            date_candidate = datetime.utcnow().strftime("%Y-%m-%d")
-            for txt in row_texts:
-                date_match = re.search(r"\b(\d{2}[-\/]\d{2}[-\/]\d{4}|\d{4}[-\/]\d{2}[-\/]\d{2})\b", txt)
-                if date_match:
-                    raw_d = date_match.group(1).replace("/", "-")
-                    if len(raw_d.split("-")[0]) == 2:
-                        d_parts = raw_d.split("-")
-                        date_candidate = f"{d_parts[2]}-{d_parts[1]}-{d_parts[0]}"
-                    else:
-                        date_candidate = raw_d
-                    break
+            except Exception as e:
+                logger.error(f"Error scraping {ins_name}: {e}")
 
-            # Extract insurer statutory code directly from last 3 digits of SFIN if present
-            sfin_clean = sfin_candidate.strip()
-            inferred_reg = default_reg
-            if len(sfin_clean) >= 16:
-                tail_code = sfin_clean[-3:]
-                if tail_code.isdigit():
-                    inferred_reg = str(int(tail_code))
+            if not found_funds:
+                logger.info(f"Found 0 records for '{ins_name}'.")
 
-            if sfin_candidate and nav_candidate:
-                funds.append({
-                    "sfin": sfin_candidate,
-                    "fund_name": name_candidate if name_candidate else f"ULIP Fund {sfin_candidate}",
-                    "insurer_id": f"INS_{inferred_reg}",
-                    "reg_number": inferred_reg,
-                    "latest_nav": nav_candidate,
-                    "nav_date": date_candidate,
-                    "status": "ACTIVE"
-                })
-
-    return funds
-
-def scrape_all_ulip_funds(active_insurers: List[Dict]) -> List[Dict]:
-    """
-    Executes dynamic traversal of the ASP.NET portal and harvests ULIP funds.
-    """
-    session = get_session()
-    nav_url = discover_nav_portal_url(session)
-
-    if not nav_url:
-        logger.warning("Could not dynamically resolve active NAV portal from %s.", BASE_COUNCIL_URL)
-        return []
-
-    logger.info("Connecting to NAV portal at: %s", nav_url)
-    session.headers.update({"Referer": nav_url})
-
-    try:
-        get_resp = session.get(nav_url, timeout=REQUEST_TIMEOUT)
-        if get_resp.status_code != 200:
-            logger.warning("Portal landing returned HTTP %d", get_resp.status_code)
-            return []
-    except Exception as exc:
-        logger.warning("Failed connecting to NAV portal: %s", exc)
-        return []
-
-    initial_soup = BeautifulSoup(get_resp.text, "html.parser")
-
-    # Attempt 1: Check if landing page contains pre-loaded data
-    landing_funds = parse_ulip_table(initial_soup)
-    if landing_funds:
-        logger.info("Found %d ULIP funds directly on initial landing view.", len(landing_funds))
-        return landing_funds
-
-    form = initial_soup.find("form")
-    if not form:
-        logger.warning("No ASP.NET form tag found on %s", nav_url)
-        return []
-
-    action_url = form.get("action") or nav_url
-    if not action_url.startswith("http"):
-        action_url = urljoin(nav_url, action_url)
-    action_url = normalize_url(action_url)
-
-    state = extract_aspnet_state(initial_soup)
-    logger.info("Captured %d ASP.NET state variables (__VIEWSTATE length: %d)", len(state), len(state.get("__VIEWSTATE", "")))
-
-    all_funds: Dict[str, Dict] = {}
-
-    # Attempt 2: Try bulk query without filtering by individual insurer
-    # Often clicking the primary submit button returns all entities
-    submit_buttons = form.find_all("input", {"type": "submit"})
-    if submit_buttons:
-        btn_name = submit_buttons[0].get("name")
-        btn_val = submit_buttons[0].get("value", "Submit")
-        bulk_payload = state.copy()
-        if btn_name:
-            bulk_payload[btn_name] = btn_val
-
-        try:
-            bulk_resp = session.post(action_url, data=bulk_payload, timeout=REQUEST_TIMEOUT)
-            if bulk_resp.status_code == 200:
-                bulk_soup = BeautifulSoup(bulk_resp.text, "html.parser")
-                bulk_funds = parse_ulip_table(bulk_soup)
-                if bulk_funds:
-                    logger.info("Bulk query extracted %d total ULIP funds across all insurers.", len(bulk_funds))
-                    for f in bulk_funds:
-                        all_funds[f["sfin"]] = f
-                    return list(all_funds.values())
-        except Exception as exc:
-            logger.warning("Bulk query failed: %s", exc)
-
-    # Attempt 3: Query per insurer via dropdown selection
-    selects = form.find_all("select")
-    insurer_select = None
-    for sel in selects:
-        opts_text = " ".join([o.get_text().lower() for o in sel.find_all("option")])
-        if any(term in opts_text for term in ["life", "hdfc", "sbi", "prudential", "lic"]):
-            insurer_select = sel
-            break
-
-    if not insurer_select:
-        logger.warning("Could not identify insurer dropdown control.")
-        return list(all_funds.values())
-
-    sel_name = insurer_select.get("name")
-    options = insurer_select.find_all("option")
-    logger.info("Found insurer select '%s' with %d options.", sel_name, len(options))
-
-    for opt in options:
-        opt_val = opt.get("value", "").strip()
-        opt_label = clean_text(opt.get_text())
-        if not opt_val or opt_val in ["0", "-1", "Select", "All"]:
-            continue
-
-        # Match option to known insurer
-        matched_insurer = None
-        for ins in active_insurers:
-            ins_name = (ins.get("insurer_name") or ins.get("entity_name") or "").lower()
-            reg_num = str(ins.get("reg_number", "")).strip()
-            if reg_num and reg_num in opt_label:
-                matched_insurer = ins
-                break
-            tokens = [t for t in ins_name.split() if len(t) > 4 and t not in ["insurance", "company", "limited"]]
-            if tokens and all(t in opt_label.lower() for t in tokens[:2]):
-                matched_insurer = ins
-                break
-
-        assigned_reg = str(matched_insurer.get("reg_number", "UNKNOWN")) if matched_insurer else "UNKNOWN"
-
-        post_payload = state.copy()
-        post_payload[sel_name] = opt_val
-        post_payload["__EVENTTARGET"] = sel_name
-        post_payload["__EVENTARGUMENT"] = ""
-
-        # Include button click simulation if required
-        if submit_buttons and submit_buttons[0].get("name"):
-            post_payload[submit_buttons[0]["name"]] = submit_buttons[0].get("value", "Submit")
-
-        try:
-            resp = session.post(action_url, data=post_payload, timeout=REQUEST_TIMEOUT)
-            if resp.status_code == 200:
-                result_soup = BeautifulSoup(resp.text, "html.parser")
-                # Update ViewState for subsequent requests
-                new_state = extract_aspnet_state(result_soup)
-                if new_state.get("__VIEWSTATE"):
-                    state = new_state
-
-                funds = parse_ulip_table(result_soup, default_reg=assigned_reg)
-                for f in funds:
-                    all_funds[f["sfin"]] = f
-                if funds:
-                    logger.info("Option '%s' (Reg %s): Extracted %d ULIP SFIN funds.", opt_label, assigned_reg, len(funds))
-        except Exception as exc:
-            logger.warning("Error querying option '%s': %s", opt_label, exc)
-
-    logger.info("Total dynamic ULIP funds gathered: %d", len(all_funds))
-    return list(all_funds.values())
+            for f in found_funds:
+                yield f
