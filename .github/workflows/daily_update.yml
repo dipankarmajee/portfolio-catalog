@@ -8,8 +8,8 @@ on:
     branches:
       - main
     paths-ignore:
-      - 'data/**'          # Prevents build loops when SQLite catalogs are committed
-      - 'documentation/**' # Prevents build loops when database documentation updates
+      - 'data/**'          # Prevents recursive build loops
+      - 'documentation/**' # Prevents build loops when docs update
       - 'README.md'
 
 permissions:
@@ -21,14 +21,18 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install Dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run Dedicated Ingestion Services
@@ -47,5 +51,15 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/ documentation/
-          git diff --staged --quiet || (git commit -m "chore: catalog & schema documentation update [$(date -u +'%Y-%m-%d %H:%M:%S')]" && git push)
+          
+          # Force track both data and documentation directories
+          git add -A data/ documentation/
+          
+          if ! git diff --staged --quiet; then
+            TIMESTAMP=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+            git commit -m "chore(catalog): automated sync & docs refresh [${TIMESTAMP}]"
+            git pull --rebase origin main
+            git push origin main
+          else
+            echo "No database or documentation changes detected."
+          fi
