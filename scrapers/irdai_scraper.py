@@ -1,8 +1,5 @@
 """
 scrapers/irdai_scraper.py
-
-Fully dynamic crawler for IRDAI regulated entities.
-Filters placeholder/javascript anchors and traverses legitimate directory tables.
 """
 
 import logging
@@ -26,6 +23,7 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
@@ -35,13 +33,16 @@ class IRDAIScraper:
         retries = Retry(total=3, backoff_factor=1.0, status_forcelist=[429, 500, 502, 503, 504], raise_on_status=False)
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
         self.session.headers.update(HEADERS)
+        self.session.cookies.set("language", "en_US")
 
     @staticmethod
-    def _clean_text(val: Optional[str]) -> str:
+    def _clean_english_text(val: Optional[str]) -> str:
+        """Strips Hindi/Devanagari characters and formats clean English text."""
         if not val:
             return ""
-        val = re.sub(r"^/\s*", "", val.strip())
-        return re.sub(r"\s+", " ", val).strip()
+        cleaned = re.sub(r"[\u0900-\u097F]+", " ", val)
+        cleaned = re.sub(r"^/\s*", "", cleaned.strip())
+        return re.sub(r"\s+", " ", cleaned).strip()
 
     @staticmethod
     def _normalize_category_key(label: str) -> str:
@@ -50,7 +51,7 @@ class IRDAIScraper:
         return "_".join(tokens) if tokens else "REGULATED_ENTITY"
 
     def discover_directories(self) -> List[Tuple[str, str]]:
-        logger.info("Discovering entity directories dynamically from portal root...")
+        logger.info("Discovering financial entity directories dynamically from portal root...")
         discovered: Dict[str, str] = {}
 
         try:
@@ -62,15 +63,20 @@ class IRDAIScraper:
             nav_containers = soup.find_all(["nav", "ul", "div", "header"], class_=re.compile(r"menu|nav|navbar|dropdown", re.I))
             candidates = nav_containers if nav_containers else [soup]
 
-            indicator_pattern = re.compile(r"insurer|broker|agent|intermediar|surveyor|repository|tpa|aggregator|registered|list-of", re.I)
-            exclusion_pattern = re.compile(r"tender|career|circular|contact|faq|press|annual|report|rti", re.I)
+            target_pattern = re.compile(
+                r"(?:list-of-)?(?:life|general|health|non-life|re)?insurers?|brokers?|corporate-agents?|web-aggregators?|insurance-repositor(?:y|ies)",
+                re.I
+            )
+            noise_pattern = re.compile(
+                r"surveyor|holiday|tpa|requirement|fee|lapsed|gro|ombudsman|tender|career|circular|annual-report|rti|faq|press|contact|guideline|penalty|document-detail|order|advisory|noc\.",
+                re.I
+            )
 
             for container in candidates:
                 for a in container.find_all("a", href=True):
                     raw_href = a["href"].strip()
-                    label = self._clean_text(a.get_text())
+                    label = self._clean_english_text(a.get_text())
 
-                    # Strict filter for non-routable hrefs and placeholder javascript tags
                     if not raw_href or raw_href.lower().startswith(("javascript:", "#", "mailto:", "tel:")):
                         continue
                     if raw_href in (";", "javascript:;", "javascript:void(0);"):
@@ -79,24 +85,25 @@ class IRDAIScraper:
                     target_url = urljoin(BASE_PORTAL, raw_href)
                     parsed = urlparse(target_url)
 
-                    # Only accept real HTTP/HTTPS protocols
-                    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                    # Restrict to irdai.gov.in host and exclude document endpoints/files
+                    if parsed.scheme not in ("http", "https") or parsed.netloc != "irdai.gov.in":
+                        continue
+                    if any(ext in parsed.path.lower() for ext in [".pdf", ".xlsx", ".docx", ".zip"]):
                         continue
 
                     path = parsed.path.lower()
-                    if exclusion_pattern.search(path):
+                    if noise_pattern.search(path) or noise_pattern.search(label) or any(k in path for k in ["/hi/", "/hindi/"]):
                         continue
 
-                    if indicator_pattern.search(path) or indicator_pattern.search(label):
-                        cat_label = label if len(label) > 3 else path.strip("/").split("/")[-1]
-                        cat_key = self._normalize_category_key(cat_label)
+                    if target_pattern.search(path) or target_pattern.search(label):
+                        cat_key = self._normalize_category_key(label) if len(label) > 3 else path.strip("/").split("/")[-1].upper().replace("-", "_")
                         if target_url not in discovered.values():
                             discovered[cat_key] = target_url
 
         except Exception as e:
             logger.error(f"Error during dynamic discovery: {e}")
 
-        logger.info(f"Discovered {len(discovered)} valid HTTP directories dynamically.")
+        logger.info(f"Discovered {len(discovered)} valid financial entity directories.")
         return list(discovered.items())
 
     def scrape_directory(self, category: str, url: str) -> Generator[Dict[str, str], None, None]:
@@ -121,10 +128,9 @@ class IRDAIScraper:
                 if len(rows) < 2:
                     break
 
-                headers = [self._clean_text(c.get_text()).lower() for c in rows[0].find_all(["th", "td"])]
+                headers = [self._clean_english_text(c.get_text()).lower() for c in rows[0].find_all(["th", "td"])]
                 reg_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ["reg", "sl", "sr", "code", "licence", "license"])), 0)
                 name_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ["name", "entity", "insurer", "company", "broker", "corporate"])), 1)
-                web_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ["web", "link", "url", "portal"])), None)
 
                 records_found = 0
                 for row in rows[1:]:
@@ -132,36 +138,52 @@ class IRDAIScraper:
                     if len(cells) <= max(reg_idx, name_idx):
                         continue
 
-                    raw_reg = self._clean_text(cells[reg_idx].get_text())
-                    name = self._clean_text(cells[name_idx].get_text())
-                    if not name or name.lower() in ("name", "total", "description"):
+                    raw_reg = self._clean_english_text(cells[reg_idx].get_text())
+                    raw_name = cells[name_idx].get_text()
+                    clean_name = self._clean_english_text(raw_name)
+
+                    if not clean_name or clean_name.lower() in ("name", "total", "description"):
                         continue
+
+                    # 1. Direct regex URL discovery across raw text and HTML of all cells in this row
+                    row_raw_text = " | ".join(c.get_text() for c in cells)
+                    found_urls = re.findall(r"https?://[^\s<>\"\'|]+", row_raw_text)
+                    valid_urls = [u.rstrip("/,.;)") for u in found_urls if "irdai.gov.in" not in u]
+                    web_url = valid_urls[0] if valid_urls else ""
+
+                    # 2. Check <a> href attributes if not found in text
+                    if not web_url:
+                        for c in cells:
+                            for a in c.find_all("a", href=True):
+                                href = a["href"].strip()
+                                if href.startswith("http") and "irdai.gov.in" not in href:
+                                    web_url = href.rstrip("/,.;)")
+                                    break
+                            if web_url:
+                                break
+
+                    # 3. Fallback: Extract from registered email domain if URL is not explicitly printed
+                    if not web_url:
+                        email_matches = re.findall(r"@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", row_raw_text)
+                        for domain in email_matches:
+                            clean_domain = domain.lower().lstrip("www.")
+                            if clean_domain not in ("gmail.com", "yahoo.com", "outlook.com", "gov.in"):
+                                web_url = f"https://www.{clean_domain}"
+                                break
 
                     reg_digits = re.search(r"\d+", raw_reg)
                     reg_num = reg_digits.group(0) if reg_digits else raw_reg
-
-                    web_url = ""
-                    if web_idx is not None and len(cells) > web_idx:
-                        a_tag = cells[web_idx].find("a")
-                        web_url = a_tag.get("href", "") if a_tag else self._clean_text(cells[web_idx].get_text())
-                    else:
-                        a_tag = cells[name_idx].find("a")
-                        if a_tag and a_tag.get("href"):
-                            web_url = a_tag.get("href", "")
-
-                    if web_url and not web_url.startswith("http"):
-                        web_url = urljoin(BASE_PORTAL, web_url)
 
                     records_found += 1
                     yield {
                         "category": category,
                         "reg_number": reg_num,
-                        "entity_name": name,
+                        "entity_name": clean_name,
                         "website": web_url,
                         "source_url": current_url,
                     }
 
-                # Follow pagination dynamically
+                # Follow pagination
                 next_url = None
                 for a in soup.find_all("a", href=True):
                     txt = a.get_text().strip().lower()

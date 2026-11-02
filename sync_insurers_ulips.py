@@ -1,11 +1,5 @@
 """
 sync_insurers_ulips.py
-
-Fully dynamic end-to-end sync for data/master_insurers_ulips.sqlite:
-- Dynamically crawls IRDAI to populate master_regulated_entities and master_insurers.
-- Scrapes the Life Council portal for ULIP funds and maps them to master_insurers.
-- Enriches funds with commercial umbrella names dynamically (zero hardcoding).
-- Logs daily prices in ulip_nav_history and computes price analytics.
 """
 
 import logging
@@ -30,6 +24,9 @@ STOPWORDS = {
     "services", "ins", "general", "assurance"
 }
 
+def is_devanagari(text: str) -> bool:
+    """Checks if a string contains Hindi/Devanagari characters."""
+    return bool(re.search(r"[\u0900-\u097F]", text))
 
 def clean_corporate_name(text: str) -> str:
     if not text:
@@ -40,7 +37,6 @@ def clean_corporate_name(text: str) -> str:
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     tokens = sorted([t for t in text.split() if t not in STOPWORDS and len(t) > 1])
     return " ".join(tokens)
-
 
 def match_insurer_id(scraped_name: str, insurer_registry: Dict[str, str]) -> Optional[str]:
     clean_target = clean_corporate_name(scraped_name)
@@ -81,7 +77,6 @@ def match_insurer_id(scraped_name: str, insurer_registry: Dict[str, str]) -> Opt
             best_id = ins_id
 
     return best_id if best_score >= 0.60 else None
-
 
 def init_database_schema(conn: sqlite3.Connection):
     cursor = conn.cursor()
@@ -150,68 +145,48 @@ def init_database_schema(conn: sqlite3.Connection):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_ulip_hist_sfin ON ulip_nav_history(sfin)")
     conn.commit()
 
-
 def enrich_commercial_names(conn: sqlite3.Connection):
     """
-    Dynamically enriches master_ulip_funds with commercial product names.
-    Combines live API lookup with algorithmic structural token extraction.
-    Zero hardcoded values.
+    Enriches master_ulip_funds with commercial product names and statutory UINs
+    streamed dynamically from IRDAI registries. Zero hardcoded assets.
     """
     cursor = conn.cursor()
     commercial_scraper = CommercialPlanScraper()
-    mappings = commercial_scraper.fetch_dynamic_insurer_mappings()
+    irdai_catalog = commercial_scraper.fetch_irdai_product_catalog()
 
-    logger.info(f"Applying dynamic commercial product mappings ({len(mappings)} entries)...")
-    for item in mappings:
-        sfin = item.get("sfin")
-        prod_name = item.get("product_name")
-        uin = item.get("uin")
+    cursor.execute("SELECT sfin, fund_name FROM master_ulip_funds")
+    all_funds = cursor.fetchall()
+    logger.info(f"Resolving commercial product names for {len(all_funds)} statutory funds...")
 
-        if sfin and prod_name:
-            cursor.execute("""
-                UPDATE master_ulip_funds
-                SET commercial_product_name = CASE 
-                        WHEN commercial_product_name IS NULL OR commercial_product_name = '' THEN ?
-                        WHEN instr(commercial_product_name, ?) > 0 THEN commercial_product_name
-                        ELSE commercial_product_name || ' / ' || ?
-                    END,
-                    uin = coalesce(uin, ?)
-                WHERE sfin = ?
-            """, (prod_name, prod_name, prod_name, uin, sfin))
+    updates = []
+    delimiters = re.compile(r"\s+-\s+|\s+–\s+|\s+:\s+")
 
-    # Algorithmic extraction from fund names with delimiter prefixes (e.g., 'Brand - Fund Name')
-    cursor.execute("""
-        SELECT sfin, fund_name
-        FROM master_ulip_funds
-        WHERE commercial_product_name IS NULL OR commercial_product_name = ''
-    """)
-    rows = cursor.fetchall()
+    for sfin, fund_name in all_funds:
+        ins_code = sfin[-3:]
+        products = irdai_catalog.get(ins_code, [])
 
-    algorithmic_updates = []
-    delimiter_pattern = re.compile(r"\s+-\s+|\s+–\s+|\s+:\s+")
+        matched = commercial_scraper.resolve_best_product(sfin, fund_name, products)
+        if matched:
+            uin, prod_name = matched
+            updates.append((prod_name, uin, sfin))
+        else:
+            # Fallback to normalized product family from fund name if not in IRDAI registry
+            parts = delimiters.split(fund_name)
+            candidate = parts[0].strip() if len(parts) > 1 and len(parts[0].strip()) > 3 else fund_name.strip()
+            updates.append((candidate, None, sfin))
 
-    for sfin, fund_name in rows:
-        if not fund_name:
-            continue
-        parts = delimiter_pattern.split(fund_name)
-        if len(parts) > 1 and len(parts[0].strip()) > 3:
-            umbrella_candidate = parts[0].strip()
-            algorithmic_updates.append((umbrella_candidate, sfin))
-
-    if algorithmic_updates:
-        cursor.executemany("""
-            UPDATE master_ulip_funds
-            SET commercial_product_name = ?
-            WHERE sfin = ? AND (commercial_product_name IS NULL OR commercial_product_name = '')
-        """, algorithmic_updates)
+    cursor.executemany("""
+        UPDATE master_ulip_funds
+        SET commercial_product_name = ?,
+            uin = coalesce(?, uin)
+        WHERE sfin = ?
+    """, updates)
 
     conn.commit()
-
-
+    logger.info(f"Commercial product enrichment complete for {len(updates)} funds.")
+    
 def compute_and_update_price_analytics(conn: sqlite3.Connection):
-    """Calculates High, Low, and Average prices from historical observations."""
     cursor = conn.cursor()
-
     cursor.execute("""
         SELECT sfin, MAX(nav), MIN(nav), AVG(nav)
         FROM ulip_nav_history
@@ -240,9 +215,7 @@ def compute_and_update_price_analytics(conn: sqlite3.Connection):
                 nav_52w_low = latest_nav
             WHERE latest_nav IS NOT NULL AND nav_avg IS NULL
         """)
-
     conn.commit()
-
 
 def sync_all():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -251,9 +224,7 @@ def sync_all():
     cursor = conn.cursor()
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
-    # -------------------------------------------------------------
     # 1. DYNAMIC IRDAI DISCOVERY & SYNC
-    # -------------------------------------------------------------
     irdai_scraper = IRDAIScraper()
 
     upsert_ent_sql = """
@@ -262,11 +233,14 @@ def sync_all():
         ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
         ON CONFLICT(entity_id) DO UPDATE SET
             category = excluded.category,
-            entity_name = excluded.entity_name,
+            entity_name = CASE 
+                WHEN ? AND NOT ? THEN master_regulated_entities.entity_name 
+                ELSE excluded.entity_name 
+            END,
             reg_number = excluded.reg_number,
             source_url = excluded.source_url,
             updated_at = excluded.updated_at,
-            website = excluded.website
+            website = coalesce(nullif(excluded.website, ''), master_regulated_entities.website)
     """
 
     upsert_ins_sql = """
@@ -274,9 +248,12 @@ def sync_all():
             insurer_id, insurer_name, reg_number, category, website, source_url, status, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
         ON CONFLICT(insurer_id) DO UPDATE SET
-            insurer_name = excluded.insurer_name,
+            insurer_name = CASE 
+                WHEN ? AND NOT ? THEN master_insurers.insurer_name 
+                ELSE excluded.insurer_name 
+            END,
             reg_number = excluded.reg_number,
-            website = excluded.website,
+            website = coalesce(nullif(excluded.website, ''), master_insurers.website),
             source_url = excluded.source_url,
             updated_at = excluded.updated_at
     """
@@ -288,26 +265,28 @@ def sync_all():
     for item in irdai_scraper.scrape_all():
         reg = item["reg_number"] or str(ent_count + 1)
         cat = item["category"]
+        name = item["entity_name"]
         entity_id = f"ENT_{reg}" if reg.isdigit() else f"ENT_{cat}_{reg}"
+        is_dev = is_devanagari(name)
 
         cursor.execute(upsert_ent_sql, (
-            entity_id, cat, item["entity_name"], reg, item["source_url"], now_iso, item["website"]
+            entity_id, cat, name, reg, item["source_url"], now_iso, item["website"],
+            is_dev, False
         ))
         ent_count += 1
 
         if "LIFE" in cat and "NON_LIFE" not in cat:
             ins_id = f"INS_{reg}"
             cursor.execute(upsert_ins_sql, (
-                ins_id, item["entity_name"], reg, cat, item["website"], item["source_url"], now_iso
+                ins_id, name, reg, cat, item["website"], item["source_url"], now_iso,
+                is_dev, False
             ))
             ins_count += 1
 
     conn.commit()
     logger.info(f"IRDAI Ingest Complete: {ent_count} entities and {ins_count} life insurers.")
 
-    # -------------------------------------------------------------
-    # 2. DYNAMIC LIFE INSURANCE COUNCIL ULIP SYNC
-    # -------------------------------------------------------------
+    # 2. DYNAMIC LIFE COUNCIL SCRAPE
     cursor.execute("SELECT insurer_id, insurer_name FROM master_insurers")
     raw_insurers = cursor.fetchall()
     insurer_registry: Dict[str, str] = {
@@ -371,9 +350,7 @@ def sync_all():
         conn.commit()
         funds_count += len(ulip_batch)
 
-    # -------------------------------------------------------------
-    # 3. COMMERCIAL PLAN ENRICHMENT & PRICE ANALYTICS
-    # -------------------------------------------------------------
+    # 3. ENRICHMENT & METRICS
     enrich_commercial_names(conn)
     compute_and_update_price_analytics(conn)
 
@@ -385,7 +362,6 @@ def sync_all():
     )
 
     conn.close()
-
 
 if __name__ == "__main__":
     sync_all()
