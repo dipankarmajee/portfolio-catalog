@@ -1,11 +1,10 @@
 """
 Service: sync_equities_etfs.py
-Source: Official BSE Daily Bhavcopy & Listed Security Directory
+Format: SEBI Official UDiFF Standard (BSE CM Bhavcopy)
 """
 
 import io
 import os
-import zipfile
 import sqlite3
 import logging
 from datetime import datetime, timedelta
@@ -20,20 +19,19 @@ DB_PATH = os.path.join(BASE_DIR, "data", "master_equities_etfs.sqlite")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9"
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 }
 
 SCHEMA_DOCS = [
     ("uid", "TEXT", 1, "Unique primary key: STOCK_{scrip}, ETF_{scrip}, or SGB_{scrip}"),
-    ("symbol", "TEXT", 0, "BSE Scrip Code"),
-    ("ticker_symbol", "TEXT", 0, "Trading Ticker Symbol"),
-    ("name", "TEXT", 0, "Security / Corporate Name"),
-    ("category", "TEXT", 0, "Asset Class (STOCK, ETF, SGB)"),
+    ("symbol", "TEXT", 0, "BSE Scrip Code (FinInstrmId)"),
+    ("ticker_symbol", "TEXT", 0, "Harmonized Ticker Symbol (TckrSymb)"),
+    ("name", "TEXT", 0, "Corporate Security Description (FinInstrmNm)"),
+    ("category", "TEXT", 0, "Asset Category (STOCK, ETF, SGB)"),
     ("isin", "TEXT", 0, "ISIN Code"),
     ("exchange", "TEXT", 0, "Exchange (BSE)"),
-    ("currency", "TEXT", 0, "Trading Currency (INR)"),
-    ("latest_close", "REAL", 0, "Closing Price in INR"),
+    ("currency", "TEXT", 0, "Currency (INR)"),
+    ("latest_close", "REAL", 0, "Closing Market Price"),
     ("price_date", "TEXT", 0, "Valuation Date (YYYY-MM-DD)"),
     ("status", "TEXT", 0, "Trading Status (ACTIVE)"),
     ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
@@ -76,64 +74,63 @@ def init_db(conn: sqlite3.Connection):
             VALUES ('master_equities_etfs', ?, ?, ?, ?)
         """, SCHEMA_DOCS)
 
-def fetch_bse_records() -> List[Dict]:
+def fetch_bse_udiff() -> List[Dict]:
     today = datetime.utcnow()
-    session = requests.Session()
-    session.headers.update(HEADERS)
 
-    # Search the last 7 calendar days to guarantee hitting an open trading session
+    # Search past 7 days to cover weekends and exchange holidays
     for delta in range(7):
         target_dt = today - timedelta(days=delta)
         if target_dt.weekday() == 6:  # Skip Sundays
             continue
 
-        dd = target_dt.strftime("%d")
-        mm = target_dt.strftime("%m")
-        yy = target_dt.strftime("%y")
+        date_compact = target_dt.strftime("%Y%m%d")
         iso_date = target_dt.strftime("%Y-%m-%d")
 
-        url = f"https://www.bseindia.com/download/BhavCopy/Equity/EQ{dd}{mm}{yy}_CSV.ZIP"
-        logging.info("Checking BSE Bhavcopy for %s...", iso_date)
+        url = f"https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BSE_CM_0_0_0_{date_compact}_F_0000.CSV"
+        logging.info("Checking official UDiFF Bhavcopy for date %s...", iso_date)
 
         try:
-            resp = session.get(url, timeout=20)
-            if resp.status_code == 200 and len(resp.content) > 5000:
+            resp = requests.get(url, headers=HEADERS, timeout=25)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                df = pd.read_csv(io.StringIO(resp.text))
+                
+                # Check for standard UDiFF columns
+                if "FinInstrmId" not in df.columns or "ClsPric" not in df.columns:
+                    continue
+
                 records = []
-                with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-                    csv_name = z.namelist()[0]
-                    with z.open(csv_name) as f:
-                        df = pd.read_csv(f)
-                        for _, row in df.iterrows():
-                            sc_code = str(row["SC_CODE"]).strip()
-                            sc_name = str(row["SC_NAME"]).strip()
-                            sc_type = str(row.get("SC_TYPE", "")).strip().upper()
-                            isin = str(row.get("ISIN_CODE", "")).strip() if "ISIN_CODE" in row and pd.notna(row["ISIN_CODE"]) else None
+                for _, row in df.iterrows():
+                    sc_code = str(row["FinInstrmId"]).strip()
+                    tckr = str(row.get("TckrSymb", "")).strip()
+                    name = str(row.get("FinInstrmNm", tckr)).strip()
+                    isin = str(row.get("ISIN", "")).strip() if pd.notna(row.get("ISIN")) else None
 
-                            category = "STOCK"
-                            if "ETF" in sc_name or sc_type == "ETF":
-                                category = "ETF"
-                            elif "SGB" in sc_name or sc_name.startswith("SGB"):
-                                category = "SGB"
+                    category = "STOCK"
+                    if "ETF" in name or "ETF" in tckr:
+                        category = "ETF"
+                    elif "SGB" in name or tckr.startswith("SGB"):
+                        category = "SGB"
 
-                            try:
-                                close_val = round(float(row["CLOSE"]), 2)
-                            except (ValueError, TypeError):
-                                close_val = None
+                    try:
+                        cls_price = round(float(row["ClsPric"]), 2)
+                    except (ValueError, TypeError):
+                        cls_price = None
 
-                            records.append({
-                                "uid": f"{category}_{sc_code}",
-                                "symbol": sc_code,
-                                "ticker_symbol": sc_name.split()[0] if sc_name else sc_code,
-                                "name": sc_name,
-                                "category": category,
-                                "isin": isin,
-                                "exchange": "BSE",
-                                "currency": "INR",
-                                "latest_close": close_val,
-                                "price_date": iso_date,
-                                "status": "ACTIVE" if close_val else "INACTIVE"
-                            })
-                logging.info("Loaded %d securities from Bhavcopy date %s.", len(records), iso_date)
+                    records.append({
+                        "uid": f"{category}_{sc_code}",
+                        "symbol": sc_code,
+                        "ticker_symbol": tckr,
+                        "name": name,
+                        "category": category,
+                        "isin": isin,
+                        "exchange": "BSE",
+                        "currency": "INR",
+                        "latest_close": cls_price,
+                        "price_date": iso_date,
+                        "status": "ACTIVE" if cls_price else "INACTIVE"
+                    })
+
+                logging.info("Extracted %d securities from UDiFF Bhavcopy (%s).", len(records), iso_date)
                 return records
         except Exception as e:
             logging.debug("Date %s skipped: %s", iso_date, e)
@@ -145,9 +142,9 @@ def sync():
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
-    records = fetch_bse_records()
+    records = fetch_bse_udiff()
     if not records:
-        logging.warning("No recent Bhavcopy found. Table unmodified.")
+        logging.warning("No recent Bhavcopy found. Master table untouched.")
         conn.close()
         return
 
@@ -179,3 +176,7 @@ def sync():
         """, upsert_rows)
 
     conn.close()
+    logging.info("Equities sync completed: %d records updated.", len(upsert_rows))
+
+if __name__ == "__main__":
+    sync()

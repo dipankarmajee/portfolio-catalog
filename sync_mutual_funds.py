@@ -1,6 +1,6 @@
 """
 Service: sync_mutual_funds.py
-Source: AMFI India (portal.amfiindia.com / amfiindia.com)
+Source: AMFI India Official Feed (amfiindia.com)
 """
 
 import os
@@ -26,7 +26,7 @@ SCHEMA_DOCS = [
     ("category", "TEXT", 0, "SEBI Scheme Classification"),
     ("nav", "REAL", 0, "Latest Net Asset Value per unit in INR"),
     ("nav_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
-    ("status", "TEXT", 0, "ACTIVE if valid positive NAV present, else INACTIVE"),
+    ("status", "TEXT", 0, "ACTIVE if NAV > 0 else INACTIVE"),
     ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
 ]
 
@@ -78,9 +78,7 @@ def parse_iso_date(raw_date: str) -> Optional[str]:
     return None
 
 def fetch_amfi_data() -> List[Tuple]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     logging.info("Streaming master NAV file from AMFI...")
     resp = requests.get(AMFI_NAV_URL, headers=headers, timeout=60)
     resp.raise_for_status()
@@ -97,7 +95,6 @@ def fetch_amfi_data() -> List[Tuple]:
 
         parts = [p.strip() for p in line.split(";")]
 
-        # Section headings (AMCs or Categories)
         if len(parts) == 1:
             header_val = parts[0]
             if any(term in header_val for term in ["Mutual Fund", "AMC", "Asset Management"]):
@@ -106,24 +103,22 @@ def fetch_amfi_data() -> List[Tuple]:
                 current_category = header_val
             continue
 
-        # Data rows start with a numeric Scheme Code
-        if len(parts) >= 5 and parts[0].isdigit():
+        if len(parts) >= 6 and parts[0].isdigit():
             scheme_code = parts[0]
             raw_date = parts[-1]
             raw_nav = parts[-2]
 
-            isin_payout = parts[1] if len(parts) >= 6 and parts[1] and parts[1] != "-" else None
-            isin_reinv = parts[2] if len(parts) >= 6 and parts[2] and parts[2] != "-" else None
+            isin_payout = parts[1] if parts[1] and parts[1] != "-" else None
+            isin_reinv = parts[2] if parts[2] and parts[2] != "-" else None
 
-            # Handle scheme names containing internal semicolons
-            if len(parts) == 6:
+            # Handle 8-column layout (Scheme;ISIN1;ISIN2;Name;Plan;Option;NAV;Date) vs 6-column
+            if len(parts) >= 8:
+                scheme_name = f"{parts[3]} - {parts[4]} - {parts[5]}".replace(" - -", "").strip()
+            elif len(parts) == 6:
                 scheme_name = parts[3]
-            elif len(parts) > 6:
-                scheme_name = "; ".join(parts[3:-2])
             else:
-                scheme_name = parts[1]
+                scheme_name = "; ".join(parts[3:-2])
 
-            # Parse numeric NAV cleanly
             nav = None
             if raw_nav and raw_nav != "-":
                 try:
@@ -135,17 +130,9 @@ def fetch_amfi_data() -> List[Tuple]:
             status = "ACTIVE" if (nav is not None and nav > 0) else "INACTIVE"
 
             records.append((
-                f"MF_{scheme_code}",
-                scheme_code,
-                isin_payout,
-                isin_reinv,
-                scheme_name,
-                current_amc,
-                current_category,
-                nav,
-                nav_date,
-                status,
-                now_iso
+                f"MF_{scheme_code}", scheme_code, isin_payout, isin_reinv,
+                scheme_name, current_amc, current_category, nav, nav_date,
+                status, now_iso
             ))
 
     return records
@@ -156,7 +143,7 @@ def sync():
     init_db(conn)
 
     records = fetch_amfi_data()
-    logging.info("Extracted %d total records from AMFI.", len(records))
+    logging.info("Extracted %d total MF records.", len(records))
 
     with conn:
         conn.executemany("""
@@ -177,7 +164,7 @@ def sync():
         """, records)
 
     conn.close()
-    logging.info("Mutual funds sync complete.")
+    logging.info("Mutual funds sync completed.")
 
 if __name__ == "__main__":
     sync()

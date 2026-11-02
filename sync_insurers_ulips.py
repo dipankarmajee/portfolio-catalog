@@ -1,6 +1,6 @@
 """
 Service: sync_insurers_ulips.py
-Source: Life Insurance Council Member Registry (lifeinscouncil.org)
+Source: Life Insurance Council Member Directory (lifeinscouncil.org)
 """
 
 import os
@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "master_insurers_ulips.sqlite")
 
-COUNCIL_MEMBERS_URL = "https://www.lifeinscouncil.org/members.aspx"
+COUNCIL_URL = "https://www.lifeinscouncil.org/consumers/ListOfCompanies"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
@@ -84,6 +84,60 @@ def init_db(conn: sqlite3.Connection):
         """, all_docs)
 
 def fetch_insurers() -> List[Dict]:
-    logging.info("Retrieving insurers directory from Life Insurance Council...")
+    logging.info("Fetching registered life insurers from Life Insurance Council...")
     try:
-        resp = requests.get(COUNCIL_MEMBERS_URL, headers=HEADERS, timeout
+        resp = requests.get(COUNCIL_URL, headers=HEADERS, timeout=25)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        insurers = []
+        for tr in soup.find_all("tr"):
+            tds = tr.find_all("td")
+            if len(tds) >= 2:
+                raw_name = tds[1].get_text(strip=True)
+                # Split addresses/newlines to isolate the corporation name
+                name_clean = raw_name.split("\n")[0].split("No.")[0].split("Tel")[0].strip()
+                if len(name_clean) > 4 and "Company" in name_clean or "Corporation" in name_clean or "Limited" in name_clean:
+                    slug = re.sub(r"[^A-Za-z0-9]", "", name_clean)[:10].upper()
+                    insurers.append({
+                        "insurer_id": slug,
+                        "insurer_name": name_clean,
+                        "reg_number": tds[0].get_text(strip=True),
+                        "status": "ACTIVE"
+                    })
+
+        unique = {i["insurer_id"]: i for i in insurers}
+        return list(unique.values())
+    except Exception as e:
+        logging.error("Failed to parse insurers: %s", e)
+        return []
+
+def sync():
+    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    init_db(conn)
+
+    insurers = fetch_insurers()
+    now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+
+    if insurers:
+        rows = [
+            (i["insurer_id"], i["insurer_name"], i["reg_number"], i["status"], now_iso)
+            for i in insurers
+        ]
+        with conn:
+            conn.executemany("""
+                INSERT INTO master_insurers (insurer_id, insurer_name, reg_number, status, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(insurer_id) DO UPDATE SET
+                    insurer_name=excluded.insurer_name,
+                    reg_number=excluded.reg_number,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+            """, rows)
+
+    conn.close()
+    logging.info("Synced %d insurers dynamically.", len(insurers))
+
+if __name__ == "__main__":
+    sync()
