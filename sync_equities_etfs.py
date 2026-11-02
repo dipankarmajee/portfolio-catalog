@@ -1,178 +1,153 @@
+"""
+Service: sync_equities_etfs.py
+Purpose: Synchronizes Equities, ETFs, and Sovereign Gold Bonds (SGBs) into a normalized SQLite table.
+Features:
+  - External target definition file (no hardcoded tickers in code).
+  - Explicit schema documentation table.
+  - Safe multi-ticker fetching with currency and exchange attributes.
+"""
+
 import os
+import json
 import sqlite3
-import math
+import logging
 from datetime import datetime
-import requests
+from typing import Dict, List, Optional
 import yfinance as yf
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 DB_PATH = os.path.join("data", "master_equities_etfs.sqlite")
-os.makedirs("data", exist_ok=True)
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+FALLBACK_PATH = os.path.join("config", "fallbacks_equities.json")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS market_instruments (
-            uid TEXT PRIMARY KEY,
-            category TEXT NOT NULL,
-            name TEXT NOT NULL,
-            symbol_or_code TEXT NOT NULL,
-            isin TEXT,
-            issuer TEXT,
-            latest_nav REAL,
-            nav_date TEXT,
-            status TEXT NOT NULL,
-            last_synced_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+SCHEMA_DOCS = [
+    ("uid", "TEXT", 1, "Deterministic unique ID (e.g. STOCK_RELIANCE, ETF_NIFTYBEES)"),
+    ("symbol", "TEXT", 0, "Exchange trading symbol (e.g. RELIANCE.NS, TMPV.NS)"),
+    ("name", "TEXT", 0, "Official entity / security description"),
+    ("category", "TEXT", 0, "Asset class (STOCK, ETF, or SGB)"),
+    ("isin", "TEXT", 0, "International Securities Identification Number"),
+    ("exchange", "TEXT", 0, "Primary exchange identifier (NSE or BSE)"),
+    ("currency", "TEXT", 0, "Trading currency (INR)"),
+    ("latest_close", "REAL", 0, "Last traded closing price / NAV equivalent"),
+    ("price_date", "TEXT", 0, "Date of valuation in ISO 8601 format (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "Trading status (ACTIVE or DELISTED)"),
+    ("updated_at", "TEXT", 0, "Synchronization UTC timestamp (ISO 8601)")
+]
 
-def extract_price(symbol_variants):
-    if isinstance(symbol_variants, str):
-        symbol_variants = [symbol_variants]
+def init_db(conn: sqlite3.Connection):
+    """Creates tables and documents every column."""
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS master_equities_etfs (
+                uid TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                isin TEXT,
+                exchange TEXT NOT NULL,
+                currency TEXT NOT NULL,
+                latest_close REAL,
+                price_date TEXT,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_markets_category ON master_equities_etfs(category)")
 
-    for sym in symbol_variants:
-        try:
-            t = yf.Ticker(sym)
-            hist = t.history(period="1mo")
-            if not hist.empty:
-                closes = hist["Close"].dropna()
-                if not closes.empty:
-                    val = float(closes.iloc[-1])
-                    if not math.isnan(val) and val > 0:
-                        return round(val, 2)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS _schema_documentation (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                is_primary_key INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                PRIMARY KEY (table_name, column_name)
+            )
+        """)
+        conn.executemany("""
+            INSERT OR REPLACE INTO _schema_documentation 
+            (table_name, column_name, data_type, is_primary_key, description)
+            VALUES ('master_equities_etfs', ?, ?, ?, ?)
+        """, SCHEMA_DOCS)
 
-            for attr in ("last_price", "previous_close", "regular_market_price"):
-                val = t.fast_info.get(attr)
-                if val is not None and not math.isnan(float(val)) and float(val) > 0:
-                    return round(float(val), 2)
-        except Exception:
-            continue
-    return None
+def load_instrument_registry() -> List[Dict]:
+    """Reads target tracking instruments from config/fallbacks_equities.json."""
+    if not os.path.exists(FALLBACK_PATH):
+        logging.warning("Instrument registry %s not found. No tickers to sync.", FALLBACK_PATH)
+        return []
+    try:
+        with open(FALLBACK_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, list) else []
+    except Exception as e:
+        logging.error("Failed to read %s: %s. Returning empty registry.", FALLBACK_PATH, e)
+        return []
 
 def sync():
-    init_db()
-    print("[Markets] Synchronizing Equities, ETFs, and Sovereign Gold Bonds...")
-    now_iso = datetime.now().isoformat()
-    today_str = datetime.now().strftime("%d-%b-%Y")
-    records = []
-
-    # 1. Equities
-    equities = [
-        ("RELIANCE", "Reliance Industries Limited", "INE002A01018", ["RELIANCE.NS", "RELIANCE.BO"]),
-        ("TCS", "Tata Consultancy Services Limited", "INE467B01029", ["TCS.NS", "TCS.BO"]),
-        ("HDFCBANK", "HDFC Bank Limited", "INE040A01034", ["HDFCBANK.NS", "HDFCBANK.BO"]),
-        ("INFY", "Infosys Limited", "INE009A01021", ["INFY.NS", "INFY.BO"]),
-        ("TATAMOTORS", "Tata Motors Limited", "INE155A01022", ["TATAMOTORS.BO", "TATAMOTORS.NS", "TMPV.NS"]),
-        ("ITC", "ITC Limited", "INE154A01025", ["ITC.NS", "ITC.BO"]),
-        ("ICICIBANK", "ICICI Bank Limited", "INE090A01021", ["ICICIBANK.NS", "ICICIBANK.BO"]),
-        ("SBIN", "State Bank of India", "INE062A01020", ["SBIN.NS", "SBIN.BO"])
-    ]
-    for sym, name, isin, lookup_tickers in equities:
-        records.append({
-            "uid": f"STOCK_{sym}",
-            "category": "STOCK",
-            "name": name,
-            "symbol_or_code": f"{sym}.NS",
-            "lookup_tickers": lookup_tickers,
-            "isin": isin,
-            "issuer": "NSE India",
-            "latest_nav": None,
-            "nav_date": today_str
-        })
-
-    # 2. ETFs
-    etfs = [
-        ("NIFTYBEES", "Nippon India Nifty 50 BeES ETF", "INF204KB14I2", ["NIFTYBEES.NS", "NIFTYBEES.BO"]),
-        ("BANKBEES", "Nippon India Nifty Bank BeES ETF", "INF204KB14L6", ["BANKBEES.NS", "BANKBEES.BO"]),
-        ("GOLDBEES", "Nippon India ETF Gold BeES", "INF732E01037", ["GOLDBEES.NS", "GOLDBEES.BO"]),
-        ("SILVERBEES", "Nippon India Silver ETF", "INF204KB19R0", ["SILVERBEES.NS", "SILVERBEES.BO"]),
-        ("JUNIORBEES", "Nippon India Nifty Next 50 Junior BeES ETF", "INF204K01016", ["JUNIORBEES.NS", "JUNIORBEES.BO"])
-    ]
-    for sym, name, isin, lookup_tickers in etfs:
-        records.append({
-            "uid": f"ETF_{sym}",
-            "category": "ETF",
-            "name": name,
-            "symbol_or_code": f"{sym}.NS",
-            "lookup_tickers": lookup_tickers,
-            "isin": isin,
-            "issuer": "NSE India",
-            "latest_nav": None,
-            "nav_date": today_str
-        })
-
-    # 3. Sovereign Gold Bonds (Tranches)
-    sgbs = [
-        ("SGBMAY29", "Sovereign Gold Bond 2021-22 Series I", "IN0020210053", ["SGBMAY29.BO", "SGBMAY29-GB.NS", "SGBMAY29.NS"]),
-        ("SGBDE28", "Sovereign Gold Bond 2020-21 Series IX", "IN0020200377", ["SGBDE28.BO", "SGBDE28-GB.NS", "SGBDE28.NS"]),
-        ("SGBJA29", "Sovereign Gold Bond 2020-21 Series X", "IN0020200385", ["SGBJA29.BO", "SGBJA29-GB.NS", "SGBJA29.NS"]),
-        ("SGBMR30", "Sovereign Gold Bond 2021-22 Series X", "IN0020210210", ["SGBMR30.BO", "SGBMR30-GB.NS", "SGBMR30.NS"])
-    ]
-    for sym, name, isin, lookup_tickers in sgbs:
-        records.append({
-            "uid": f"SGB_{sym}",
-            "category": "SGB",
-            "name": name,
-            "symbol_or_code": f"{sym}.NS",
-            "lookup_tickers": lookup_tickers,
-            "isin": isin,
-            "issuer": "Reserve Bank of India",
-            "latest_nav": None,
-            "nav_date": today_str
-        })
-
-    # 4. Resolve Live Prices
-    gold_benchmark_price = None
-
-    for r in records:
-        price = extract_price(r["lookup_tickers"])
-        if price is not None and not math.isnan(price):
-            r["latest_nav"] = price
-            if r["uid"] == "ETF_GOLDBEES":
-                # 1 unit Gold BeES represents approx 0.01g gold (or 100 units = ~1g gold)
-                gold_benchmark_price = round(price * 65.5, 2)  # Benchmark gram valuation proxy
-
-    # 5. Fallback for thin-volume SGBs: Peg directly to pure 24K gold valuation if unquoted
-    if gold_benchmark_price is None:
-        gold_benchmark_price = 7850.00  # Fallback gold 1g reference rate
-
-    for r in records:
-        if r["category"] == "SGB" and r["latest_nav"] is None:
-            r["latest_nav"] = gold_benchmark_price
-
-    # 6. Database Upsert
+    os.makedirs("data", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    for r in records:
-        params = (
-            r["uid"],
-            r["category"],
-            r["name"],
-            r["symbol_or_code"],
-            r.get("isin"),
-            r["issuer"],
-            r["latest_nav"],
-            r["nav_date"],
-            now_iso
-        )
-        cur.execute("""
-            INSERT INTO market_instruments (uid, category, name, symbol_or_code, isin, issuer, latest_nav, nav_date, status, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
-            ON CONFLICT(uid) DO UPDATE SET
-                name=excluded.name,
-                isin=excluded.isin,
-                latest_nav=coalesce(excluded.latest_nav, market_instruments.latest_nav),
-                nav_date=excluded.nav_date,
-                status='ACTIVE',
-                last_synced_at=excluded.last_synced_at
-        """, params)
+    init_db(conn)
 
-    conn.commit()
+    registry = load_instrument_registry()
+    if not registry:
+        logging.info("Registry is empty. Nothing to fetch.")
+        conn.close()
+        return
+
+    now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+    upsert_rows = []
+
+    for item in registry:
+        symbol = item.get("symbol")
+        uid = item.get("uid", f"MKT_{symbol}")
+        name = item.get("name", symbol)
+        category = item.get("category", "STOCK")
+        isin = item.get("isin")
+        exchange = item.get("exchange", "NSE")
+        currency = item.get("currency", "INR")
+
+        price = None
+        price_date = None
+        status = "ACTIVE"
+
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                last_row = hist.iloc[-1]
+                price = round(float(last_row["Close"]), 2)
+                price_date = hist.index[-1].strftime("%Y-%m-%d")
+            else:
+                status = "INACTIVE"
+        except Exception as e:
+            logging.warning("Unable to fetch live quote for %s: %s", symbol, e)
+            status = "FETCH_FAILED"
+
+        upsert_rows.append((
+            uid, symbol, name, category, isin, exchange, currency,
+            price, price_date, status, now_iso
+        ))
+
+    with conn:
+        conn.executemany("""
+            INSERT INTO master_equities_etfs (
+                uid, symbol, name, category, isin, exchange, currency,
+                latest_close, price_date, status, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                name=excluded.name,
+                category=excluded.category,
+                isin=excluded.isin,
+                exchange=excluded.exchange,
+                currency=excluded.currency,
+                latest_close=excluded.latest_close,
+                price_date=excluded.price_date,
+                status=excluded.status,
+                updated_at=excluded.updated_at
+        """, upsert_rows)
+
     conn.close()
-    print(f"[Markets] Completed upsert for {len(records)} instruments.")
+    logging.info("Markets (Equities/ETFs/SGBs) sync completed with %d entries.", len(upsert_rows))
 
 if __name__ == "__main__":
     sync()

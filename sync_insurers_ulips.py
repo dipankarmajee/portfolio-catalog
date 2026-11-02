@@ -1,151 +1,170 @@
+"""
+Service: sync_insurers_ulips.py
+Purpose: Synchronizes registered life insurers and ULIP SFIN funds into a normalized SQLite catalog.
+Features:
+  - Separate structured tables for Insurers and ULIP SFIN Funds.
+  - Automatic column documentation (_schema_documentation).
+  - External fallback & registry loader without in-code static data.
+"""
+
 import os
+import json
 import sqlite3
+import logging
 from datetime import datetime
+from typing import Dict, List, Tuple
 import requests
-from bs4 import BeautifulSoup
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 DB_PATH = os.path.join("data", "master_insurers_ulips.sqlite")
-os.makedirs("data", exist_ok=True)
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
-PORTAL_URL = "https://www.lifeinscouncil.org/industry%20information/ListOfFundNAVs"
+FALLBACK_PATH = os.path.join("config", "fallbacks_insurers_ulips.json")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS insurers_ulips (
-            uid TEXT PRIMARY KEY,
-            category TEXT NOT NULL,
-            name TEXT NOT NULL,
-            sfin TEXT NOT NULL,
-            insurer_name TEXT NOT NULL,
-            latest_nav REAL,
-            nav_date TEXT,
-            status TEXT NOT NULL,
-            last_synced_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+INSURERS_DOCS = [
+    ("insurer_id", "TEXT", 1, "Unique statutory insurer code (e.g. HDF111, SBI111)"),
+    ("insurer_name", "TEXT", 0, "Registered life insurance corporation name"),
+    ("reg_number", "TEXT", 0, "IRDAI statutory registration sequence number"),
+    ("status", "TEXT", 0, "Regulatory status (ACTIVE or SUSPENDED)"),
+    ("updated_at", "TEXT", 0, "Sync timestamp in UTC (ISO 8601)")
+]
+
+ULIP_DOCS = [
+    ("sfin", "TEXT", 1, "16-character Segregated Fund Identification Number"),
+    ("fund_name", "TEXT", 0, "Official public fund name"),
+    ("insurer_id", "TEXT", 0, "Foreign key linking to master_insurers.insurer_id"),
+    ("inception_date", "TEXT", 0, "Statutory fund allotment launch date (YYYY-MM-DD)"),
+    ("latest_nav", "REAL", 0, "Latest declared closing NAV per unit"),
+    ("nav_date", "TEXT", 0, "Valuation date in ISO 8601 format (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "Fund status (ACTIVE or CLOSED)"),
+    ("updated_at", "TEXT", 0, "Sync timestamp in UTC (ISO 8601)")
+]
+
+def init_db(conn: sqlite3.Connection):
+    """Creates distinct tables and populates self-documenting catalog metadata."""
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS master_insurers (
+                insurer_id TEXT PRIMARY KEY,
+                insurer_name TEXT NOT NULL,
+                reg_number TEXT,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS master_ulip_funds (
+                sfin TEXT PRIMARY KEY,
+                fund_name TEXT NOT NULL,
+                insurer_id TEXT NOT NULL,
+                inception_date TEXT,
+                latest_nav REAL,
+                nav_date TEXT,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (insurer_id) REFERENCES master_insurers(insurer_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ulip_insurer ON master_ulip_funds(insurer_id)")
+
+        # Schema documentation table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS _schema_documentation (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                is_primary_key INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                PRIMARY KEY (table_name, column_name)
+            )
+        """)
+
+        all_docs = [('master_insurers', *d) for d in INSURERS_DOCS] + \
+                   [('master_ulip_funds', *d) for d in ULIP_DOCS]
+
+        conn.executemany("""
+            INSERT OR REPLACE INTO _schema_documentation 
+            (table_name, column_name, data_type, is_primary_key, description)
+            VALUES (?, ?, ?, ?, ?)
+        """, all_docs)
+
+def load_external_definitions() -> Tuple[List[Dict], List[Dict]]:
+    """Loads insurers and ULIP fund targets from config file safely."""
+    if not os.path.exists(FALLBACK_PATH):
+        logging.info("Optional configuration %s not found. Proceeding with blank defaults.", FALLBACK_PATH)
+        return [], []
+    try:
+        with open(FALLBACK_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            insurers = data.get("insurers", [])
+            funds = data.get("ulip_funds", [])
+            return insurers, funds
+    except Exception as e:
+        logging.warning("Error reading %s: %s. Continuing with empty lists.", FALLBACK_PATH, e)
+        return [], []
 
 def sync():
-    init_db()
-    print("[ULIPs] Connecting to Life Insurance Council Portal...")
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    now_iso = datetime.now().isoformat()
-    today_str = datetime.now().strftime("%d-%b-%Y")
-    records = []
-
-    try:
-        r = session.get(PORTAL_URL, timeout=25)
-        soup = BeautifulSoup(r.text, "html.parser")
-        
-        dropdown = soup.find("select", {"id": "MainContent_drpselectinscompany"})
-        if not dropdown:
-            print("[ULIPs] Could not locate insurer dropdown.")
-            return
-
-        options = [(opt.get("value"), opt.text.strip()) for opt in dropdown.find_all("option") if opt.get("value") and opt.get("value") != "0"]
-        print(f"[ULIPs] Located {len(options)} registered insurers. Querying funds...")
-
-        viewstate = soup.find("input", {"id": "__VIEWSTATE"})["value"]
-        eventval = soup.find("input", {"id": "__EVENTVALIDATION"})["value"] if soup.find("input", {"id": "__EVENTVALIDATION"}) else ""
-        viewstategen = soup.find("input", {"id": "__VIEWSTATEGENERATOR"})["value"] if soup.find("input", {"id": "__VIEWSTATEGENERATOR"}) else ""
-
-        for val, company_name in options:
-            records.append({
-                "uid": f"INSURER_{val}",
-                "category": "INSURER",
-                "name": company_name,
-                "sfin": val,
-                "insurer_name": company_name,
-                "latest_nav": None,
-                "nav_date": today_str
-            })
-
-            # Query funds for this insurer
-            payload = {
-                "__VIEWSTATE": viewstate,
-                "__VIEWSTATEGENERATOR": viewstategen,
-                "__EVENTVALIDATION": eventval,
-                "ctl00$MainContent$drpselectinscompany": val,
-                "ctl00$MainContent$btngetdata": "Get Data"
-            }
-            try:
-                post_resp = session.post(PORTAL_URL, data=payload, timeout=20)
-                sub_soup = BeautifulSoup(post_resp.text, "html.parser")
-                table = sub_soup.find("table", {"id": "MainContent_GridView1"}) or sub_soup.find("table", {"class": "table"})
-                
-                if table:
-                    for row in table.find_all("tr")[1:]:
-                        tds = [td.text.strip() for td in row.find_all("td")]
-                        if len(tds) >= 4:
-                            fund_name = tds[1]
-                            sfin = tds[2]
-                            try:
-                                nav = float(tds[3].replace(",", ""))
-                            except ValueError:
-                                nav = None
-                            
-                            records.append({
-                                "uid": f"ULIP_{sfin}",
-                                "category": "ULIP_FUND",
-                                "name": fund_name,
-                                "sfin": sfin,
-                                "insurer_name": company_name,
-                                "latest_nav": nav,
-                                "nav_date": today_str
-                            })
-            except Exception as e:
-                print(f"Error querying {company_name}: {e}")
-
-    except Exception as e:
-        print(f"[ULIPs] Life Council portal error: {e}")
-
-    # Fallback essential SFIN catalog if council site undergoes maintenance
-    if not any(r["category"] == "ULIP_FUND" for r in records):
-        print("[ULIPs] Activating verified statutory SFIN baseline dataset...")
-        baseline = [
-            ("ULIF001100105EQUITY-FND111", "SBI Life - Equity Fund", "SBI Life Insurance Company Limited", 186.08),
-            ("ULIF002100105TOP300-FND111", "SBI Life - Top 300 Fund", "SBI Life Insurance Company Limited", 125.40),
-            ("ULIF006150107PEEQITYFND111", "SBI Life Unit Plus III Equity Pension Fund", "SBI Life Insurance Company Limited", 64.20),
-            ("ULIF01424/11/04OPPORTUNIT101", "HDFC Life - Opportunities Fund", "HDFC Life Insurance Company Limited", 56.45),
-            ("ULIF06801/09/10MAXIMISER105", "ICICI Pru - Maximiser Fund V", "ICICI Prudential Life Insurance", 38.92)
-        ]
-        for sfin, fund_name, insurer, nav in baseline:
-            records.append({
-                "uid": f"ULIP_{sfin}",
-                "category": "ULIP_FUND",
-                "name": fund_name,
-                "sfin": sfin,
-                "insurer_name": insurer,
-                "latest_nav": nav,
-                "nav_date": today_str
-            })
-
-    # Database Upsert
+    os.makedirs("data", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    for r in records:
-        params = (r["uid"], r["category"], r["name"], r["sfin"], r["insurer_name"], r["latest_nav"], r["nav_date"], now_iso)
-        cur.execute("""
-            INSERT INTO insurers_ulips (uid, category, name, sfin, insurer_name, latest_nav, nav_date, status, last_synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)
-            ON CONFLICT(uid) DO UPDATE SET
-                name=excluded.name,
-                insurer_name=excluded.insurer_name,
-                latest_nav=coalesce(excluded.latest_nav, insurers_ulips.latest_nav),
-                nav_date=excluded.nav_date,
-                status='ACTIVE',
-                last_synced_at=excluded.last_synced_at
-        """, params)
+    init_db(conn)
 
-    conn.commit()
+    insurers_list, funds_list = load_external_definitions()
+    now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+
+    # 1. Upsert Insurers
+    insurer_rows = []
+    for ins in insurers_list:
+        insurer_rows.append((
+            ins["insurer_id"],
+            ins["insurer_name"],
+            ins.get("reg_number"),
+            ins.get("status", "ACTIVE"),
+            now_iso
+        ))
+
+    if insurer_rows:
+        with conn:
+            conn.executemany("""
+                INSERT INTO master_insurers (insurer_id, insurer_name, reg_number, status, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(insurer_id) DO UPDATE SET
+                    insurer_name=excluded.insurer_name,
+                    reg_number=excluded.reg_number,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+            """, insurer_rows)
+
+    # 2. Upsert ULIP SFIN Funds
+    fund_rows = []
+    for f in funds_list:
+        fund_rows.append((
+            f["sfin"],
+            f["fund_name"],
+            f["insurer_id"],
+            f.get("inception_date"),
+            f.get("latest_nav"),
+            f.get("nav_date"),
+            f.get("status", "ACTIVE"),
+            now_iso
+        ))
+
+    if fund_rows:
+        with conn:
+            conn.executemany("""
+                INSERT INTO master_ulip_funds (sfin, fund_name, insurer_id, inception_date, latest_nav, nav_date, status, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sfin) DO UPDATE SET
+                    fund_name=excluded.fund_name,
+                    insurer_id=excluded.insurer_id,
+                    inception_date=excluded.inception_date,
+                    latest_nav=excluded.latest_nav,
+                    nav_date=excluded.nav_date,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+            """, fund_rows)
+
     conn.close()
-    print(f"[ULIPs] Finished sync with {len(records)} insurers and fund items.")
+    logging.info("Insurers and ULIPs sync finished: %d insurers, %d funds processed.", len(insurer_rows), len(fund_rows))
 
 if __name__ == "__main__":
     sync()

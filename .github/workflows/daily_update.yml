@@ -6,10 +6,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main # Change to 'master' if your default branch is master
+      - main
     paths-ignore:
-      - 'data/**' # Prevents infinite build loops when the bot pushes updated databases
-      - '*.md'    # Optional: skip runs on documentation edits
+      - 'data/**'          # Prevents build loops when SQLite catalogs are committed
+      - 'documentation/**' # Prevents build loops when database documentation updates
+      - 'README.md'
 
 permissions:
   contents: write
@@ -37,9 +38,14 @@ jobs:
           python sync_equities_etfs.py
           python sync_insurers_ulips.py
 
-      - name: Commit and Push Database Updates
+      - name: Generate Database Schema Documentation
+        run: |
+          mkdir -p documentation
+          python generate_schema_docs.py
+
+      - name: Commit and Push Database & Documentation Updates
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
-          git diff --staged --quiet || (git commit -m "chore: automated catalog sync [$(date -u +'%Y-%m-%d %H:%M:%S')]" && git push)
+          git add data/ documentation/
+          git diff --staged --quiet || (git commit -m "chore: catalog & schema documentation update [$(date -u +'%Y-%m-%d %H:%M:%S')]" && git push)
