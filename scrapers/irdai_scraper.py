@@ -1,10 +1,12 @@
 """
 Module: scrapers.irdai_scraper
-Purpose: Diagnostic inspector to dump actual DOM elements on IRDAI endpoint.
+Purpose: Targeted diagnostic to identify the exact link patterns and containers
+representing insurer entities on irdai.gov.in/life-insurers.
 """
 
 import logging
 import sys
+import re
 import requests
 from bs4 import BeautifulSoup
 from urllib3.util import create_urllib3_context
@@ -13,7 +15,7 @@ from requests.adapters import HTTPAdapter
 logger = logging.getLogger("scrapers.irdai")
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [DIAGNOSTIC] %(message)s"))
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [DIAGNOSTIC_2] %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
@@ -35,25 +37,37 @@ def scrape_registered_life_insurers():
     })
 
     resp = session.get(TARGET_URL, timeout=30)
-    logger.info("HTTP Status: %d | Content Length: %d bytes", resp.status_code, len(resp.content))
-
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # 1. Print all tables and their header rows if any exist
-    tables = soup.find_all("table")
-    logger.info("Found %d table(s) on page.", len(tables))
-    for idx, tbl in enumerate(tables):
-        headers = [th.get_text(strip=True) for th in tbl.find_all(["th", "td"])]
-        logger.info("Table %d first row elements: %s", idx, headers[:6])
+    # Filter out common UI navigation tokens
+    ui_noise = {
+        "skip to content", "main content", "english", "accessibility options",
+        "zoom the page", "increase text", "decrease text", "grey scale",
+        "high contrast", "low contrast", "light background", "site map",
+        "home", "feedback", "contact us", "screen reader access"
+    }
 
-    # 2. Inspect Drupal main content view container
-    content = soup.find("main") or soup.find("div", class_="region-content") or soup.find("body")
-    if content:
-        # Find any links with 'insurer' or company-like patterns
-        links = content.find_all("a")
-        logger.info("Found %d links inside main region.", len(links))
-        sample_links = [a.get_text(strip=True) for a in links if len(a.get_text(strip=True)) > 5]
-        logger.info("Sample links (first 10): %s", sample_links[:10])
+    meaningful_links = []
+    for a in soup.find_all("a", href=True):
+        text = " ".join(a.get_text().split()).strip()
+        href = a["href"].strip()
+        if len(text) > 4 and text.lower() not in ui_noise:
+            # Check parent container classes to see how Drupal groups them
+            parent_classes = a.parent.get("class", []) if a.parent else []
+            grandparent_classes = a.parent.parent.get("class", []) if a.parent and a.parent.parent else []
+            meaningful_links.append((text, href, parent_classes, grandparent_classes))
 
-    # Exit gracefully without throwing an exception to inspect the log
+    logger.info("Found %d meaningful non-UI links.", len(meaningful_links))
+
+    # Print samples covering different parts of the list
+    logger.info("--- Sample First 15 Meaningful Links ---")
+    for text, href, p_cls, gp_cls in meaningful_links[:15]:
+        logger.info("Link: '%s' | Href: '%s' | Container: %s -> %s", text, href, p_cls, gp_cls)
+
+    if len(meaningful_links) > 30:
+        logger.info("--- Sample Middle 10 Links ---")
+        for text, href, p_cls, gp_cls in meaningful_links[20:30]:
+            logger.info("Link: '%s' | Href: '%s' | Container: %s -> %s", text, href, p_cls, gp_cls)
+
+    # Return empty to allow clean pipeline run while inspecting logs
     return []
