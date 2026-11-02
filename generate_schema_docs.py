@@ -6,8 +6,11 @@ Purpose: Generates documentation/DATABASE_SCHEMA.md
 import os
 import sqlite3
 import json
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(BASE_DIR, "documentation")
