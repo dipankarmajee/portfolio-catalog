@@ -30,7 +30,7 @@ DATABASES = [
     {
         "name": "Insurers & ULIP SFIN Catalog",
         "file": os.path.join(BASE_DIR, "data", "master_insurers_ulips.sqlite"),
-        "tables": ["master_insurers", "master_ulip_funds"]
+        "tables": ["master_regulated_entities", "master_insurers", "master_ulip_funds"]
     }
 ]
 

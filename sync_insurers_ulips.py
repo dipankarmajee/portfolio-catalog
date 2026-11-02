@@ -1,7 +1,6 @@
 """
 Service: sync_insurers_ulips.py
 Purpose: Ingests all IRDAI regulated entities and ULIP funds into SQLite.
-Handles entity deduplication, schema migrations, and relational integrity.
 """
 
 import os
@@ -17,14 +16,46 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-from scrapers.irdai_scraper import scrape_all_regulated_entities, scrape_registered_life_insurers
+from scrapers.irdai_scraper import scrape_all_regulated_entities
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "master_insurers_ulips.sqlite")
 
+REGULATED_ENTITIES_DOCS = [
+    ("entity_id", "TEXT", 1, "Unique primary key: ENT_{reg_number}"),
+    ("entity_name", "TEXT", 0, "Registered entity corporate description"),
+    ("reg_number", "TEXT", 0, "Statutory registration or license number"),
+    ("category", "TEXT", 0, "IRDAI regulatory sector classification"),
+    ("website", "TEXT", 0, "Official public web portal URL"),
+    ("source_url", "TEXT", 0, "Source IRDAI directory registry endpoint"),
+    ("status", "TEXT", 0, "Regulatory status (ACTIVE)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
+]
+
+INSURERS_DOCS = [
+    ("insurer_id", "TEXT", 1, "Unique primary key: INS_{reg_number}"),
+    ("insurer_name", "TEXT", 0, "Registered life insurance corporation name"),
+    ("reg_number", "TEXT", 0, "Official statutory registration number"),
+    ("category", "TEXT", 0, "Statutory class (LIFE_INSURERS)"),
+    ("website", "TEXT", 0, "Official corporate portal URL"),
+    ("source_url", "TEXT", 0, "Source IRDAI registry endpoint"),
+    ("status", "TEXT", 0, "Regulatory status (ACTIVE)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
+]
+
+ULIP_DOCS = [
+    ("sfin", "TEXT", 1, "16-character Segregated Fund Identification Number"),
+    ("fund_name", "TEXT", 0, "Official public fund name"),
+    ("insurer_id", "TEXT", 0, "Foreign key -> master_insurers.insurer_id"),
+    ("inception_date", "TEXT", 0, "Launch date (YYYY-MM-DD)"),
+    ("latest_nav", "REAL", 0, "Latest closing NAV per unit"),
+    ("nav_date", "TEXT", 0, "Valuation date (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "Fund status (ACTIVE / CLOSED)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
+]
+
 def init_db(conn: sqlite3.Connection):
     with conn:
-        # 1. Master Table: All Regulated Entities across India (Brokers, Health, Non-Life, Life, etc.)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS master_regulated_entities (
                 entity_id TEXT PRIMARY KEY,
@@ -38,8 +69,6 @@ def init_db(conn: sqlite3.Connection):
                 UNIQUE(category, reg_number, entity_name)
             )
         """)
-
-        # 2. Master Life Insurers Table (Required for ULIP SFIN fund mappings)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS master_insurers (
                 insurer_id TEXT PRIMARY KEY,
@@ -52,8 +81,6 @@ def init_db(conn: sqlite3.Connection):
                 updated_at TEXT NOT NULL
             )
         """)
-
-        # 3. Master ULIP SFIN Funds Table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS master_ulip_funds (
                 sfin TEXT PRIMARY KEY,
@@ -67,6 +94,25 @@ def init_db(conn: sqlite3.Connection):
                 FOREIGN KEY (insurer_id) REFERENCES master_insurers(insurer_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS _schema_documentation (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                data_type TEXT NOT NULL,
+                is_primary_key INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                PRIMARY KEY (table_name, column_name)
+            )
+        """)
+        
+        all_docs = [('master_regulated_entities', *d) for d in REGULATED_ENTITIES_DOCS] + \
+                   [('master_insurers', *d) for d in INSURERS_DOCS] + \
+                   [('master_ulip_funds', *d) for d in ULIP_DOCS]
+        conn.executemany("""
+            INSERT OR REPLACE INTO _schema_documentation 
+            (table_name, column_name, data_type, is_primary_key, description)
+            VALUES (?, ?, ?, ?, ?)
+        """, all_docs)
 
 def sync():
     os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
@@ -75,7 +121,6 @@ def sync():
 
     now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
 
-    # 1. Fetch all regulated entities dynamically
     all_entities: List[Dict] = []
     try:
         all_entities = scrape_all_regulated_entities()
@@ -84,7 +129,6 @@ def sync():
         logging.error("Failed to scrape regulated entities: %s", exc)
 
     if all_entities:
-        # Populate master_regulated_entities
         entity_rows = [
             (
                 e["entity_id"],
@@ -106,13 +150,11 @@ def sync():
             """, entity_rows)
         logging.info("Saved %d total regulated entities to master_regulated_entities.", len(entity_rows))
 
-        # 2. Deduplicate Life Insurers strictly by statutory registration number
+        # Filter and deduplicate Life Insurers strictly by registration number
         life_insurers_map: Dict[str, Dict] = {}
         for e in all_entities:
-            # Check if entity belongs to Life Insurer categories
             if "LIFE" in e["category"] and "NON_LIFE" not in e["category"]:
                 reg = str(e["reg_number"]).strip()
-                # Prioritize valid numeric IRDAI statutory registration numbers
                 if reg not in life_insurers_map or (reg.isdigit() and not life_insurers_map[reg]["reg_number"].isdigit()):
                     life_insurers_map[reg] = e
 
@@ -143,7 +185,7 @@ def sync():
         logging.info("Successfully refreshed master_insurers with %d verified Life Insurers.", len(insurer_rows))
 
     else:
-        logging.warning("No records returned. Database remains unchanged.")
+        logging.warning("No records returned. Table master_insurers remains unchanged.")
 
     conn.close()
 
