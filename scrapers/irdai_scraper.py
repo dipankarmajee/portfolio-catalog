@@ -1,228 +1,195 @@
 """
-Module: scrapers.irdai_scraper
-Purpose: 100% Dynamic crawler discovering and extracting all IRDAI regulated entities across all pages.
-Excludes table header rows, redundant portal routes, and invalid entities.
+scrapers/irdai_scraper.py
+
+Fully dynamic crawler for IRDAI regulated entities.
+Filters placeholder/javascript anchors and traverses legitimate directory tables.
 """
 
 import logging
-import sys
 import re
-from typing import List, Dict
-from urllib.parse import urljoin
-import requests
+from typing import Dict, Generator, List, Optional, Set, Tuple
+from urllib.parse import urljoin, urlparse
+
 from bs4 import BeautifulSoup
-from urllib3.util import create_urllib3_context
+import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-logger = logging.getLogger("scrapers.irdai")
-if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [IRDAI_CRAWLER] %(message)s"))
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
-BASE_PORTAL_URL = "https://irdai.gov.in"
-SEED_URL = "https://irdai.gov.in/life-insurers1"
-REQUEST_TIMEOUT = 30
+BASE_PORTAL = "https://irdai.gov.in"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive"
 }
 
-class SSLHonorAdapter(HTTPAdapter):
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = create_urllib3_context()
-        ctx.load_default_certs()
-        kwargs["ssl_context"] = ctx
-        return super().init_poolmanager(*args, **kwargs)
 
-def sanitize_english_text(raw_text: str) -> str:
-    """Extracts and normalizes English text from mixed Hindi-English cells."""
-    cleaned = " ".join(raw_text.split()).strip()
-    english_segments = re.findall(r"[A-Za-z0-9\s\.\,\-\(\)\&\/\:\@]+", cleaned)
-    candidate = " ".join(" ".join(english_segments).split()).strip()
-    return candidate if candidate else cleaned
+class IRDAIScraper:
+    def __init__(self, session: Optional[requests.Session] = None):
+        self.session = session or requests.Session()
+        retries = Retry(total=3, backoff_factor=1.0, status_forcelist=[429, 500, 502, 503, 504], raise_on_status=False)
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        self.session.headers.update(HEADERS)
 
-def clean_company_name(name_raw: str) -> str:
-    cleaned = sanitize_english_text(name_raw)
-    for sep in ["Tel:", "Phone:", "Email:", "Address:", "Fax:", "CIN:", "Website:"]:
-        if sep in cleaned:
-            cleaned = cleaned.split(sep)[0].strip()
-    return cleaned
+    @staticmethod
+    def _clean_text(val: Optional[str]) -> str:
+        if not val:
+            return ""
+        val = re.sub(r"^/\s*", "", val.strip())
+        return re.sub(r"\s+", " ", val).strip()
 
-def discover_regulated_entity_sections(session: requests.Session) -> Dict[str, str]:
-    """
-    100% Dynamic discovery: Scrapes all child links under Regulated Entities
-    from the portal navigation. Zero hardcoded dictionary defaults.
-    """
-    logger.info("Discovering Regulated Entities sections dynamically from %s...", SEED_URL)
-    sections: Dict[str, str] = {}
-    
-    resp = session.get(SEED_URL, timeout=REQUEST_TIMEOUT)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to access seed URL {SEED_URL} (HTTP {resp.status_code})")
+    @staticmethod
+    def _normalize_category_key(label: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9\s]", " ", label).upper()
+        tokens = [t for t in cleaned.split() if t]
+        return "_".join(tokens) if tokens else "REGULATED_ENTITY"
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        text = " ".join(a.get_text().split()).strip()
-        
-        is_entity_href = any(k in href for k in ["-insurers", "reinsurer", "broker", "corporate-agent", "telemarketer"])
-        is_informational = any(k in href for k in ["about-", "requirements-", "lapsed-", "guidelines"])
-        
-        if is_entity_href and not is_informational and not href.startswith("javascript:") and len(text) > 3:
-            full_url = urljoin(BASE_PORTAL_URL, href)
-            cat_key = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").upper()
-            
-            if cat_key not in sections and full_url not in sections.values():
-                sections[cat_key] = full_url
+    def discover_directories(self) -> List[Tuple[str, str]]:
+        logger.info("Discovering entity directories dynamically from portal root...")
+        discovered: Dict[str, str] = {}
 
-    logger.info("Dynamically discovered %d distinct entity sections: %s", len(sections), list(sections.keys()))
-    if not sections:
-        raise RuntimeError("Dynamic menu discovery completed but found 0 entity sections.")
+        try:
+            resp = self.session.get(BASE_PORTAL, timeout=30)
+            if resp.status_code != 200:
+                return []
 
-    return sections
+            soup = BeautifulSoup(resp.text, "html.parser")
+            nav_containers = soup.find_all(["nav", "ul", "div", "header"], class_=re.compile(r"menu|nav|navbar|dropdown", re.I))
+            candidates = nav_containers if nav_containers else [soup]
 
-def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[Dict[str, str]]:
-    """Extracts entities from tables on a single page, skipping table header rows."""
-    entities = []
-    tables = soup.find_all("table")
+            indicator_pattern = re.compile(r"insurer|broker|agent|intermediar|surveyor|repository|tpa|aggregator|registered|list-of", re.I)
+            exclusion_pattern = re.compile(r"tender|career|circular|contact|faq|press|annual|report|rti", re.I)
 
-    for table in tables:
-        for tr in table.find_all("tr"):
-            # Skip if the entire row consists of <th> elements
-            if tr.find_all("th") and not tr.find_all("td"):
-                continue
+            for container in candidates:
+                for a in container.find_all("a", href=True):
+                    raw_href = a["href"].strip()
+                    label = self._clean_text(a.get_text())
 
-            cells = tr.find_all(["td", "th"])
-            if len(cells) < 2:
-                continue
+                    # Strict filter for non-routable hrefs and placeholder javascript tags
+                    if not raw_href or raw_href.lower().startswith(("javascript:", "#", "mailto:", "tel:")):
+                        continue
+                    if raw_href in (";", "javascript:;", "javascript:void(0);"):
+                        continue
 
-            cell_texts = [" ".join(c.get_text().split()).strip() for c in cells]
-            
-            # Detect statutory registration number
-            reg_candidate = None
-            for txt in cell_texts:
-                if re.match(r"^\d{1,4}$", txt) and 0 < int(txt) < 1000:
-                    reg_candidate = txt
-                    break
+                    target_url = urljoin(BASE_PORTAL, raw_href)
+                    parsed = urlparse(target_url)
 
-            # Detect company name
-            name_candidate = None
-            for txt in cell_texts:
-                eng = clean_company_name(txt)
-                if len(eng) > 6 and any(term in eng.lower() for term in ["insurance", "assurance", "corporation", "ltd", "limited", "broker", "reinsurance", "co."]):
-                    name_candidate = eng
-                    break
+                    # Only accept real HTTP/HTTPS protocols
+                    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                        continue
 
-            if not name_candidate:
-                non_num_candidates = [
-                    clean_company_name(t) for t in cell_texts
-                    if len(clean_company_name(t)) > 6 and not re.match(r"^[\d\s\-\/\.]+$", t)
-                ]
-                if non_num_candidates:
-                    name_candidate = non_num_candidates[0]
+                    path = parsed.path.lower()
+                    if exclusion_pattern.search(path):
+                        continue
 
-            if not name_candidate:
-                continue
+                    if indicator_pattern.search(path) or indicator_pattern.search(label):
+                        cat_label = label if len(label) > 3 else path.strip("/").split("/")[-1]
+                        cat_key = self._normalize_category_key(cat_label)
+                        if target_url not in discovered.values():
+                            discovered[cat_key] = target_url
 
-            # Explicitly reject table header text captured by fallback
-            lower_name = name_candidate.lower()
-            if lower_name.startswith("name of") or any(
-                h in lower_name for h in [
-                    "regn. no", "regn no", "sl. no", "sl no", "s. no", "s no",
-                    "name of insurer", "name of the insurer", "name of the foreign",
-                    "registration no", "company name", "lloyd s india service company"
-                ]
-            ):
-                continue
+        except Exception as e:
+            logger.error(f"Error during dynamic discovery: {e}")
 
-            website_url = ""
-            for a in tr.find_all("a", href=True):
-                if a["href"].startswith("http"):
-                    website_url = a["href"].strip()
-                    break
+        logger.info(f"Discovered {len(discovered)} valid HTTP directories dynamically.")
+        return list(discovered.items())
 
-            clean_reg = reg_candidate if reg_candidate else re.sub(r"[^A-Za-z0-9]", "", name_candidate)[:10].upper()
-            
-            if clean_reg.lower() in {"regnno", "slno", "sno", "regno", "nameno", "nameofthef"}:
-                continue
+    def scrape_directory(self, category: str, url: str) -> Generator[Dict[str, str], None, None]:
+        current_url = url
+        while current_url:
+            parsed = urlparse(current_url)
+            if parsed.scheme not in ("http", "https"):
+                break
 
-            entities.append({
-                "entity_id": f"ENT_{clean_reg}",
-                "entity_name": name_candidate,
-                "reg_number": clean_reg,
-                "category": category,
-                "website": website_url,
-                "source_url": page_url,
-                "status": "ACTIVE"
-            })
-
-    return entities
-
-def scrape_all_regulated_entities() -> List[Dict[str, str]]:
-    """Crawls all discovered categories across all pages."""
-    session = requests.Session()
-    session.mount("https://", SSLHonorAdapter())
-    session.headers.update(HEADERS)
-
-    sections = discover_regulated_entity_sections(session)
-    all_discovered: Dict[str, Dict[str, str]] = {}
-
-    for cat_name, cat_url in sections.items():
-        logger.info("--- Crawling Category: %s (%s) ---", cat_name, cat_url)
-        page_idx = 0
-
-        while page_idx < 15:
-            p_url = cat_url if page_idx == 0 else f"{cat_url}?page={page_idx}"
             try:
-                resp = session.get(p_url, timeout=REQUEST_TIMEOUT)
+                resp = self.session.get(current_url, timeout=30)
                 if resp.status_code != 200:
                     break
 
                 soup = BeautifulSoup(resp.text, "html.parser")
-                page_entities = parse_table_page(soup, cat_name, p_url)
-
-                new_count = 0
-                for item in page_entities:
-                    unique_key = f"{cat_name}_{item['reg_number']}_{item['entity_name']}"
-                    if unique_key not in all_discovered:
-                        all_discovered[unique_key] = item
-                        new_count += 1
-
-                logger.info("Category %s [Page %d]: Extracted %d entities (%d new).", cat_name, page_idx + 1, len(page_entities), new_count)
-
-                if new_count == 0:
-                    logger.info("Category %s: Page %d yielded 0 new entities. Moving to next category.", cat_name, page_idx + 1)
+                tables = soup.find_all("table")
+                if not tables:
                     break
 
-            except Exception as exc:
-                logger.error("Error reading %s: %s", p_url, exc)
+                table = max(tables, key=lambda t: len(t.find_all("tr")))
+                rows = table.find_all("tr")
+                if len(rows) < 2:
+                    break
+
+                headers = [self._clean_text(c.get_text()).lower() for c in rows[0].find_all(["th", "td"])]
+                reg_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ["reg", "sl", "sr", "code", "licence", "license"])), 0)
+                name_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ["name", "entity", "insurer", "company", "broker", "corporate"])), 1)
+                web_idx = next((i for i, h in enumerate(headers) if any(k in h for k in ["web", "link", "url", "portal"])), None)
+
+                records_found = 0
+                for row in rows[1:]:
+                    cells = row.find_all(["td", "th"])
+                    if len(cells) <= max(reg_idx, name_idx):
+                        continue
+
+                    raw_reg = self._clean_text(cells[reg_idx].get_text())
+                    name = self._clean_text(cells[name_idx].get_text())
+                    if not name or name.lower() in ("name", "total", "description"):
+                        continue
+
+                    reg_digits = re.search(r"\d+", raw_reg)
+                    reg_num = reg_digits.group(0) if reg_digits else raw_reg
+
+                    web_url = ""
+                    if web_idx is not None and len(cells) > web_idx:
+                        a_tag = cells[web_idx].find("a")
+                        web_url = a_tag.get("href", "") if a_tag else self._clean_text(cells[web_idx].get_text())
+                    else:
+                        a_tag = cells[name_idx].find("a")
+                        if a_tag and a_tag.get("href"):
+                            web_url = a_tag.get("href", "")
+
+                    if web_url and not web_url.startswith("http"):
+                        web_url = urljoin(BASE_PORTAL, web_url)
+
+                    records_found += 1
+                    yield {
+                        "category": category,
+                        "reg_number": reg_num,
+                        "entity_name": name,
+                        "website": web_url,
+                        "source_url": current_url,
+                    }
+
+                # Follow pagination dynamically
+                next_url = None
+                for a in soup.find_all("a", href=True):
+                    txt = a.get_text().strip().lower()
+                    rel = a.get("rel", "")
+                    raw_href = a["href"].strip()
+                    if raw_href and not raw_href.lower().startswith("javascript:"):
+                        if "next" in txt or "next" in rel or txt in (">", "»"):
+                            candidate = urljoin(BASE_PORTAL, raw_href)
+                            if urlparse(candidate).scheme in ("http", "https"):
+                                next_url = candidate
+                                break
+
+                if next_url and next_url != current_url and records_found > 0:
+                    current_url = next_url
+                else:
+                    current_url = None
+
+            except Exception as e:
+                logger.error(f"Error scraping {category} from {current_url}: {e}")
                 break
 
-            page_idx += 1
+    def scrape_all(self) -> Generator[Dict[str, str], None, None]:
+        directories = self.discover_directories()
+        seen: Set[Tuple[str, str, str]] = set()
 
-    logger.info("Total regulated entities extracted dynamically: %d", len(all_discovered))
-    return list(all_discovered.values())
-
-def scrape_registered_life_insurers() -> List[Dict[str, str]]:
-    """Compatibility adapter for sync_insurers_ulips.py returning Life Insurers."""
-    all_entities = scrape_all_regulated_entities()
-    life_insurers = [
-        {
-            "insurer_id": f"INS_{e['reg_number']}",
-            "insurer_name": e["entity_name"],
-            "reg_number": e["reg_number"],
-            "category": e["category"],
-            "website": e["website"],
-            "source_url": e["source_url"],
-            "status": e["status"]
-        }
-        for e in all_entities if "LIFE" in e["category"] and "NON_LIFE" not in e["category"]
-    ]
-    logger.info("Filtered %d Life Insurer corporate records for master_insurers.", len(life_insurers))
-    return life_insurers
+        for category, url in directories:
+            for item in self.scrape_directory(category, url):
+                key = (item["category"], item["reg_number"], item["entity_name"])
+                if key not in seen:
+                    seen.add(key)
+                    yield item

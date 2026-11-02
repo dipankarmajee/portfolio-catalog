@@ -10,7 +10,7 @@ import sys
 import json
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict
 import requests
 import pandas as pd
@@ -131,7 +131,7 @@ def fetch_live_equities() -> List[Dict]:
             "exchange": "NSE",
             "currency": "INR",
             "latest_close": None,
-            "price_date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "price_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "status": "ACTIVE"
         })
 
@@ -163,7 +163,8 @@ def sync():
         records = load_optional_fallback()
 
     if records:
-        now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+        now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
         upsert_rows = [
             (
                 r.get("uid", f"{r.get('category', 'STOCK')}_{r['symbol']}"),
@@ -175,7 +176,7 @@ def sync():
                 r.get("exchange", "NSE"),
                 r.get("currency", "INR"),
                 r.get("latest_close"),
-                r.get("price_date", datetime.utcnow().strftime("%Y-%m-%d")),
+                r.get("price_date", datetime.now(timezone.utc).strftime("%Y-%m-%d")),
                 r.get("status", "ACTIVE"),
                 now_iso
             )

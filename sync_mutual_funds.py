@@ -8,9 +8,10 @@ import os
 import json
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple, Dict
 import requests
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -92,8 +93,7 @@ def fetch_live_amfi() -> List[Tuple]:
     records = []
     current_category = "General"
     current_amc = "Unknown AMC"
-    now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
-
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     for raw_line in resp.text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -156,7 +156,7 @@ def load_optional_fallback() -> List[Tuple]:
             data = json.load(f)
             if not isinstance(data, list):
                 return []
-            now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+            now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
             records = []
             for item in data:
                 sc = str(item.get("scheme_code", "")).strip()

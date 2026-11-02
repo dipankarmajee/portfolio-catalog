@@ -7,7 +7,7 @@ import os
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -88,7 +88,7 @@ def get_sample_record(cursor: sqlite3.Cursor, table_name: str) -> Optional[Dict]
     return None
 
 def build_markdown() -> str:
-    now_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
         "# Database Schema & Catalog Health Report",
         "",
