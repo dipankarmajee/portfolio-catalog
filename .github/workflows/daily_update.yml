@@ -1,6 +1,14 @@
 name: Daily Catalog Sync & Health Check
 
 on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+      - 'data/**'
+      - 'documentation/**'
   schedule:
     # 23:45 IST (11:45 PM IST) Mon-Fri -> 18:15 UTC
     - cron: '15 18 * * 1-5'
