@@ -1,19 +1,22 @@
 """
 Service: sync_mutual_funds.py
-Source: AMFI India Official Feed (amfiindia.com)
+Source: AMFI India Official Feed
+Resilience: Attempts dynamic AMFI fetch first; uses config/fallbacks_mutual_funds.json only upon failure.
 """
 
 import os
+import json
 import sqlite3
 import logging
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "master_mutual_funds.sqlite")
+FALLBACK_PATH = os.path.join(BASE_DIR, "config", "fallbacks_mutual_funds.json")
 AMFI_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
 
 SCHEMA_DOCS = [
@@ -26,7 +29,7 @@ SCHEMA_DOCS = [
     ("category", "TEXT", 0, "SEBI Scheme Classification"),
     ("nav", "REAL", 0, "Latest Net Asset Value per unit in INR"),
     ("nav_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
-    ("status", "TEXT", 0, "ACTIVE if NAV > 0 else INACTIVE"),
+    ("status", "TEXT", 0, "ACTIVE if valid positive NAV present, else INACTIVE"),
     ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
 ]
 
@@ -77,9 +80,11 @@ def parse_iso_date(raw_date: str) -> Optional[str]:
             continue
     return None
 
-def fetch_amfi_data() -> List[Tuple]:
-    headers = {"User-Agent": "Mozilla/5.0"}
-    logging.info("Streaming master NAV file from AMFI...")
+def fetch_live_amfi() -> List[Tuple]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+    logging.info("Streaming master NAV catalog from AMFI (%s)...", AMFI_NAV_URL)
     resp = requests.get(AMFI_NAV_URL, headers=headers, timeout=60)
     resp.raise_for_status()
 
@@ -103,31 +108,32 @@ def fetch_amfi_data() -> List[Tuple]:
                 current_category = header_val
             continue
 
-        if len(parts) >= 6 and parts[0].isdigit():
+        if len(parts) >= 5 and parts[0].isdigit():
             scheme_code = parts[0]
-            raw_date = parts[-1]
-            raw_nav = parts[-2]
+            raw_date = parts[-1].strip()
+            raw_nav = parts[-2].strip()
 
-            isin_payout = parts[1] if parts[1] and parts[1] != "-" else None
-            isin_reinv = parts[2] if parts[2] and parts[2] != "-" else None
+            isin_payout = parts[1].strip() if len(parts) >= 6 and parts[1].strip() not in ("", "-") else None
+            isin_reinv = parts[2].strip() if len(parts) >= 6 and parts[2].strip() not in ("", "-") else None
 
-            # Handle 8-column layout (Scheme;ISIN1;ISIN2;Name;Plan;Option;NAV;Date) vs 6-column
-            if len(parts) >= 8:
-                scheme_name = f"{parts[3]} - {parts[4]} - {parts[5]}".replace(" - -", "").strip()
-            elif len(parts) == 6:
-                scheme_name = parts[3]
+            if len(parts) == 6:
+                scheme_name = parts[3].strip()
+            elif len(parts) > 6:
+                scheme_name = "; ".join(parts[3:-2]).strip()
             else:
-                scheme_name = "; ".join(parts[3:-2])
+                scheme_name = parts[1].strip()
 
             nav = None
-            if raw_nav and raw_nav != "-":
+            if raw_nav and raw_nav not in ("", "-"):
                 try:
-                    nav = float(raw_nav.replace(",", ""))
+                    val = float(raw_nav.replace(",", ""))
+                    if val > 0:
+                        nav = val
                 except ValueError:
                     nav = None
 
             nav_date = parse_iso_date(raw_date)
-            status = "ACTIVE" if (nav is not None and nav > 0) else "INACTIVE"
+            status = "ACTIVE" if (nav is not None and nav_date is not None) else "INACTIVE"
 
             records.append((
                 f"MF_{scheme_code}", scheme_code, isin_payout, isin_reinv,
@@ -137,34 +143,76 @@ def fetch_amfi_data() -> List[Tuple]:
 
     return records
 
+def load_optional_fallback() -> List[Tuple]:
+    if not os.path.exists(FALLBACK_PATH):
+        logging.info("Optional fallback file %s not found.", FALLBACK_PATH)
+        return []
+    try:
+        with open(FALLBACK_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                return []
+            now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
+            records = []
+            for item in data:
+                sc = str(item.get("scheme_code", ""))
+                if not sc:
+                    continue
+                records.append((
+                    item.get("uid", f"MF_{sc}"),
+                    sc,
+                    item.get("isin_div_payout_or_growth"),
+                    item.get("isin_div_reinvestment"),
+                    item.get("scheme_name", "Unknown Scheme"),
+                    item.get("amc_name", "Unknown AMC"),
+                    item.get("category", "General"),
+                    item.get("nav"),
+                    item.get("nav_date"),
+                    item.get("status", "ACTIVE" if item.get("nav") else "INACTIVE"),
+                    now_iso
+                ))
+            return records
+    except Exception as e:
+        logging.warning("Failed parsing fallback file %s: %s.", FALLBACK_PATH, e)
+        return []
+
 def sync():
     os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
-    records = fetch_amfi_data()
-    logging.info("Extracted %d total MF records.", len(records))
+    try:
+        records = fetch_live_amfi()
+        logging.info("Successfully fetched %d records dynamically from AMFI.", len(records))
+    except Exception as e:
+        logging.error("Live AMFI fetch failed: %s. Attempting fallback...", e)
+        records = load_optional_fallback()
+        if records:
+            logging.info("Engaging fallback: loaded %d records from %s.", len(records), FALLBACK_PATH)
+        else:
+            logging.warning("No fallback records found. Database unchanged.")
 
-    with conn:
-        conn.executemany("""
-            INSERT INTO master_mutual_funds (
-                uid, scheme_code, isin_div_payout_or_growth, isin_div_reinvestment,
-                scheme_name, amc_name, category, nav, nav_date, status, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(scheme_code) DO UPDATE SET
-                isin_div_payout_or_growth=excluded.isin_div_payout_or_growth,
-                isin_div_reinvestment=excluded.isin_div_reinvestment,
-                scheme_name=excluded.scheme_name,
-                amc_name=excluded.amc_name,
-                category=excluded.category,
-                nav=excluded.nav,
-                nav_date=excluded.nav_date,
-                status=excluded.status,
-                updated_at=excluded.updated_at
-        """, records)
+    if records:
+        with conn:
+            conn.executemany("""
+                INSERT INTO master_mutual_funds (
+                    uid, scheme_code, isin_div_payout_or_growth, isin_div_reinvestment,
+                    scheme_name, amc_name, category, nav, nav_date, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scheme_code) DO UPDATE SET
+                    isin_div_payout_or_growth=excluded.isin_div_payout_or_growth,
+                    isin_div_reinvestment=excluded.isin_div_reinvestment,
+                    scheme_name=excluded.scheme_name,
+                    amc_name=excluded.amc_name,
+                    category=excluded.category,
+                    nav=excluded.nav,
+                    nav_date=excluded.nav_date,
+                    status=excluded.status,
+                    updated_at=excluded.updated_at
+            """, records)
 
     conn.close()
-    logging.info("Mutual funds sync completed.")
+    logging.info("Mutual funds sync process complete.")
 
 if __name__ == "__main__":
     sync()
