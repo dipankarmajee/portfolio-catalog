@@ -1,7 +1,6 @@
 """
 Module: scrapers.irdai_scraper
-Purpose: Targeted diagnostic to identify the exact link patterns and containers
-representing insurer entities on irdai.gov.in/life-insurers.
+Purpose: Targeted diagnostic to isolate Liferay content portlets and entity records.
 """
 
 import logging
@@ -15,7 +14,7 @@ from requests.adapters import HTTPAdapter
 logger = logging.getLogger("scrapers.irdai")
 if not logger.handlers:
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [DIAGNOSTIC_2] %(message)s"))
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [DIAGNOSTIC_3] %(message)s"))
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
@@ -39,35 +38,38 @@ def scrape_registered_life_insurers():
     resp = session.get(TARGET_URL, timeout=30)
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Filter out common UI navigation tokens
-    ui_noise = {
-        "skip to content", "main content", "english", "accessibility options",
-        "zoom the page", "increase text", "decrease text", "grey scale",
-        "high contrast", "low contrast", "light background", "site map",
-        "home", "feedback", "contact us", "screen reader access"
-    }
+    # 1. Identify all Liferay Portlet containers
+    portlets = soup.find_all(["section", "div"], class_=re.compile(r"portlet"))
+    logger.info("Found %d portlet container(s) on page.", len(portlets))
+    for p in portlets:
+        p_id = p.get("id", "")
+        p_class = p.get("class", [])
+        p_text_sample = " ".join(p.get_text().split())[:80]
+        logger.info("Portlet id='%s' class='%s' | Text preview: '%s'", p_id, p_class, p_text_sample)
 
-    meaningful_links = []
+    # 2. Filter out navigation bars and locate non-nav text blocks
+    # Remove navbars, headers, and footers from search
+    for nav in soup.find_all(["nav", "header", "footer"]):
+        nav.decompose()
+    for nav_div in soup.find_all("div", class_=re.compile(r"navbar|menu|dropdown")):
+        nav_div.decompose()
+
+    # Inspect remaining non-nav content links
+    remaining_links = []
     for a in soup.find_all("a", href=True):
         text = " ".join(a.get_text().split()).strip()
         href = a["href"].strip()
-        if len(text) > 4 and text.lower() not in ui_noise:
-            # Check parent container classes to see how Drupal groups them
-            parent_classes = a.parent.get("class", []) if a.parent else []
-            grandparent_classes = a.parent.parent.get("class", []) if a.parent and a.parent.parent else []
-            meaningful_links.append((text, href, parent_classes, grandparent_classes))
+        if len(text) > 3 and not href.startswith("javascript:"):
+            remaining_links.append((text, href))
 
-    logger.info("Found %d meaningful non-UI links.", len(meaningful_links))
+    logger.info("Found %d non-nav links in main body.", len(remaining_links))
+    for text, href in remaining_links[:25]:
+        logger.info("Content Link: '%s' -> %s", text, href)
 
-    # Print samples covering different parts of the list
-    logger.info("--- Sample First 15 Meaningful Links ---")
-    for text, href, p_cls, gp_cls in meaningful_links[:15]:
-        logger.info("Link: '%s' | Href: '%s' | Container: %s -> %s", text, href, p_cls, gp_cls)
+    # 3. Check if there are raw paragraphs or div cards mentioning known insurer names
+    body_text = soup.get_text()
+    for sample_keyword in ["HDFC", "Life Insurance Corporation", "SBI Life", "ICICI Prudential", "Max Life", "Bajaj"]:
+        present = sample_keyword.lower() in body_text.lower()
+        logger.info("Keyword check '%s' present in body: %s", sample_keyword, present)
 
-    if len(meaningful_links) > 30:
-        logger.info("--- Sample Middle 10 Links ---")
-        for text, href, p_cls, gp_cls in meaningful_links[20:30]:
-            logger.info("Link: '%s' | Href: '%s' | Container: %s -> %s", text, href, p_cls, gp_cls)
-
-    # Return empty to allow clean pipeline run while inspecting logs
     return []
