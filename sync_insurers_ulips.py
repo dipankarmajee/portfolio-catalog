@@ -1,7 +1,6 @@
 """
 Service: sync_insurers_ulips.py
-Purpose: Ingests life insurers and ULIP catalogs into SQLite.
-Ensures stale/invalid entries are purged upon dynamic sync.
+Purpose: Ingests dynamic life insurers and ULIP catalogs into SQLite.
 """
 
 import os
@@ -108,7 +107,7 @@ def sync():
 
     try:
         insurers = scrape_registered_life_insurers()
-        logging.info("Dynamic scrape succeeded: %d corporate insurers gathered.", len(insurers))
+        logging.info("Dynamic scrape succeeded: %d insurers gathered.", len(insurers))
     except Exception as exc:
         logging.error("Dynamic scrape failed: %s. Checking optional fallback...", exc)
         insurers, ulip_funds = load_optional_fallback()
@@ -126,15 +125,14 @@ def sync():
             )
             for i in insurers if "reg_number" in i and "insurer_name" in i
         ]
-        
-        # Purge stale/invalid records so table exactly mirrors verified entities
         with conn:
+            # Clear old/dirty records so stale entries are removed
             conn.execute("DELETE FROM master_insurers")
             conn.executemany("""
                 INSERT INTO master_insurers (insurer_id, insurer_name, reg_number, status, updated_at)
                 VALUES (?, ?, ?, ?, ?)
             """, rows)
-        logging.info("Successfully refreshed master_insurers with %d verified corporate records.", len(rows))
+        logging.info("Cleaned and refreshed master_insurers with %d valid entities.", len(rows))
     else:
         logging.warning("No insurer records available. Database remains unchanged.")
 

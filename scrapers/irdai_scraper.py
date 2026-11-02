@@ -1,7 +1,7 @@
 """
 Module: scrapers.irdai_scraper
-Purpose: 100% Dynamic scraper for official Life Insurers directory.
-Targets official entity listings and filters out article links and councils.
+Purpose: Live dynamic scraper for registered Life Insurers.
+Target: Life Insurance Council official member directory table.
 """
 
 import logging
@@ -20,12 +20,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
-TARGET_URLS = [
-    "https://irdai.gov.in/life-insurers",
-    "https://irdai.gov.in/list-of-life-insurers",
-    "https://www.lifeinscouncil.org/members_directory"
-]
-
+TARGET_URL = "https://www.lifeinscouncil.org/industry_info/members_details.aspx"
 REQUEST_TIMEOUT = 30
 
 HEADERS = {
@@ -42,120 +37,77 @@ class SSLHonorAdapter(HTTPAdapter):
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
-def sanitize_text(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    for delimiter in ["Tel:", "Phone:", "Email:", "Address:", "Fax:", "CIN:", "Website:", "Date of Registration"]:
-        if delimiter in cleaned:
-            cleaned = cleaned.split(delimiter)[0].strip()
+def sanitize_name(raw_name: str) -> str:
+    cleaned = re.sub(r"\s+", " ", raw_name).strip()
+    # Strip address/telephone blocks if they share the cell
+    for sep in ["\n", "\r", "Address:", "Tel:", "Phone:", "Email:", "Fax:", "CIN:"]:
+        if sep in cleaned:
+            cleaned = cleaned.split(sep)[0].strip()
     return cleaned
 
-def is_commercial_life_insurer(name: str) -> bool:
-    """
-    Validates that the string is an actual commercial life insurance enterprise,
-    not an article title, product guideline, or committee.
-    """
-    if len(name) < 10 or len(name) > 100:
-        return False
-    lower = name.lower()
-
-    # Must contain life insurance/assurance designation or LIC
-    has_life = ("life" in lower and any(term in lower for term in ["insurance", "assurance"])) or "life insurance corporation" in lower
-    if not has_life:
-        return False
-
-    # Must be a commercial corporate entity
-    has_corp_suffix = any(term in lower for term in ["limited", "ltd", "corporation of india", "co. ltd"])
-    if not has_corp_suffix:
-        return False
-
-    # Exclude administrative bodies, consumer guidelines, and UI links
-    is_noise = any(term in lower for term in [
-        "council", "association", "ombudsman", "authority", "products",
-        "terms and conditions", "guidelines", "circular", "regulations",
-        "consumer", "overview", "types of", "about us", "clause", "handbook"
-    ])
-    return not is_noise
-
-def extract_reg_number(text: str) -> str:
-    match = re.search(r"(?:reg(?:istration)?\.?\s*(?:no\.?)?[:\s]*)?\b(1\d\d|[2-5]\d\d)\b", text, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    return ""
-
 def scrape_registered_life_insurers() -> List[Dict[str, str]]:
-    logger.info("Initializing statutory life insurers scraper...")
+    logger.info("Connecting to statutory member directory: %s", TARGET_URL)
     session = requests.Session()
     session.mount("https://", SSLHonorAdapter())
     session.headers.update(HEADERS)
 
-    discovered_insurers: Dict[str, Dict[str, str]] = {}
+    resp = session.get(TARGET_URL, timeout=REQUEST_TIMEOUT)
+    logger.info("HTTP Status: %d | Length: %d bytes", resp.status_code, len(resp.content))
+    resp.raise_for_status()
 
-    for target_url in TARGET_URLS:
-        logger.info("Checking directory endpoint: %s", target_url)
-        try:
-            resp = session.get(target_url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200:
-                logger.info("Endpoint %s returned HTTP %d, checking next...", target_url, resp.status_code)
-                continue
+    soup = BeautifulSoup(resp.text, "html.parser")
+    insurers: Dict[str, Dict[str, str]] = {}
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+    # Inspect all table rows
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all(["td", "th"])
+        if len(cells) < 2:
+            continue
 
-            # 1. Inspect Table Structures (standard layout on registry portals)
-            for row in soup.find_all("tr"):
-                cells = row.find_all(["td", "th"])
-                if len(cells) < 2:
-                    continue
-                row_text = " ".join(c.get_text(strip=True) for c in cells)
-                for cell in cells:
-                    candidate = sanitize_text(cell.get_text(strip=True))
-                    if is_commercial_life_insurer(candidate):
-                        reg_no = extract_reg_number(row_text) or re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
-                        discovered_insurers[candidate] = {
-                            "insurer_id": f"INS_{reg_no}",
-                            "insurer_name": candidate,
-                            "reg_number": reg_no,
+        cell_texts = [c.get_text(strip=True) for c in cells]
+
+        # Look for valid registration sequence (100 to 600)
+        reg_num = None
+        for idx, val in enumerate(cell_texts):
+            clean_digits = re.sub(r"\D", "", val)
+            if clean_digits and clean_digits.isdigit() and 100 <= int(clean_digits) <= 600:
+                reg_num = clean_digits
+                # Company name is in one of the other columns
+                name_candidates = [
+                    sanitize_name(c) for i, c in enumerate(cell_texts)
+                    if i != idx and len(c) > 6 and not re.match(r"^[\d\s\-\/\.]+$", c)
+                ]
+                if name_candidates:
+                    company_name = name_candidates[0]
+                    # Filter out header words
+                    if not any(header in company_name.lower() for header in ["name of", "regn", "registration"]):
+                        insurers[reg_num] = {
+                            "insurer_id": f"INS_{reg_num}",
+                            "insurer_name": company_name,
+                            "reg_number": reg_num,
                             "status": "ACTIVE"
                         }
+                break
 
-            # 2. Inspect Drupal View Grid / Row Containers
-            for item in soup.find_all(["div", "article", "li"], class_=re.compile(r"(views-row|views-col|card|entity|field-content)")):
-                text_block = item.get_text(separator=" ", strip=True)
-                for tag in item.find_all(["a", "h2", "h3", "h4", "strong"]):
-                    candidate = sanitize_text(tag.get_text(strip=True))
-                    if is_commercial_life_insurer(candidate):
-                        reg_no = extract_reg_number(text_block) or re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
-                        if candidate not in discovered_insurers:
-                            discovered_insurers[candidate] = {
-                                "insurer_id": f"INS_{reg_no}",
-                                "insurer_name": candidate,
-                                "reg_number": reg_no,
-                                "status": "ACTIVE"
-                            }
-
-            # 3. Direct anchor parse across content section
-            main_block = soup.find("main") or soup.find("div", id=re.compile(r"content|main")) or soup
-            for a in main_block.find_all("a"):
-                candidate = sanitize_text(a.get_text(strip=True))
-                if is_commercial_life_insurer(candidate) and candidate not in discovered_insurers:
-                    parent_text = a.parent.get_text(separator=" ", strip=True) if a.parent else ""
-                    reg_no = extract_reg_number(parent_text) or re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
-                    discovered_insurers[candidate] = {
-                        "insurer_id": f"INS_{reg_no}",
-                        "insurer_name": candidate,
-                        "reg_number": reg_no,
+    # If table scan came up short, parse entity links
+    if len(insurers) < 15:
+        logger.info("Direct cell scan found %d. Checking anchor elements...", len(insurers))
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            text = sanitize_name(a.get_text(strip=True))
+            match = re.search(r"[?&]id=(\d{3})", href, re.IGNORECASE)
+            if match and len(text) > 6:
+                r_num = match.group(1)
+                if 100 <= int(r_num) <= 600 and r_num not in insurers:
+                    insurers[r_num] = {
+                        "insurer_id": f"INS_{r_num}",
+                        "insurer_name": text,
+                        "reg_number": r_num,
                         "status": "ACTIVE"
                     }
 
-            logger.info("Found %d valid life insurer corporations from %s", len(discovered_insurers), target_url)
-            if len(discovered_insurers) >= 20:
-                break
+    logger.info("Total dynamic insurers extracted: %d", len(insurers))
+    if not insurers:
+        raise RuntimeError("Connected to directory, but 0 valid life insurance companies were parsed.")
 
-        except Exception as exc:
-            logger.warning("Error fetching %s: %s", target_url, exc)
-
-    logger.info("Total validated life insurers discovered: %d", len(discovered_insurers))
-
-    if not discovered_insurers:
-        raise RuntimeError("No life insurance companies matched corporate validation criteria.")
-
-    return list(discovered_insurers.values())
+    return list(insurers.values())
