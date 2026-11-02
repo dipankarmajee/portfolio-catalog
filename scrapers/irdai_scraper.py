@@ -1,13 +1,13 @@
 """
 Module: scrapers.irdai_scraper
 Purpose: 100% Dynamic, paginated scraper for official IRDAI Life Insurers directory.
-Inspects main view content containers to bypass repetitive header/nav links.
+Filters out statutory councils/associations while preserving all commercial life insurers.
 """
 
 import logging
 import sys
 import re
-from typing import List, Dict
+from typing import List, Dict, Set
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
@@ -45,47 +45,38 @@ def sanitize_text(text: str) -> str:
             cleaned = cleaned.split(delimiter)[0].strip()
     return cleaned
 
-def is_corporate_insurer(name: str) -> bool:
-    if len(name) < 6 or len(name) > 120:
+def is_life_insurer(name: str) -> bool:
+    if len(name) < 7 or len(name) > 120:
         return False
     lower = name.lower()
-    
-    # Exclude navigational/header links
-    noise = [
-        "skip to", "accessibility", "contrast", "text size", "home", "about us",
-        "regulations", "guidelines", "circulars", "press release", "public notice",
-        "consumer", "ombudsman", "grievance", "contact us", "feedback", "faq",
-        "act & rules", "annual reports", "handbook", "overview", "types of"
-    ]
-    if any(n in lower for n in noise):
-        return False
 
+    # Must be a corporate entity
     has_life = "life" in lower or "lic" in lower
-    has_ins = any(term in lower for term in ["insurance", "assurance", "corporation", "ltd", "limited", "co."])
-    return has_life or has_ins
+    has_corp = any(term in lower for term in ["insurance", "assurance", "corporation", "ltd", "limited", "company"])
+    
+    # Exclude regulatory bodies, councils, portals, and UI navigation links
+    is_excluded = any(term in lower for term in [
+        "council", "association", "ombudsman", "authority", "forum",
+        "types of", "about us", "regulations", "circulars", "guidelines",
+        "consumer education", "grievance", "public notice", "overview", "committee"
+    ])
 
-def extract_reg_number(text: str) -> str:
-    match = re.search(r"(?:reg(?:istration)?\.?\s*(?:no\.?)?[:\s]*)?\b(1\d\d|[2-5]\d\d)\b", text, re.IGNORECASE)
-    if match:
-        return match.group(1)
-    return ""
+    return has_life and has_corp and not is_excluded
 
-def extract_entities_from_page(soup: BeautifulSoup) -> Dict[str, Dict[str, str]]:
+def extract_entities_from_soup(soup: BeautifulSoup) -> Dict[str, Dict[str, str]]:
     page_insurers: Dict[str, Dict[str, str]] = {}
 
-    # Target the main body/content region to ignore header/footer links
-    content_area = soup.find("main") or soup.find("div", id=re.compile(r"main|content")) or soup.find("body") or soup
-
-    # 1. Check for standard table rows in main content
-    for row in content_area.find_all("tr"):
+    # 1. Search Tables
+    for row in soup.find_all("tr"):
         cells = row.find_all(["td", "th"])
         if len(cells) < 2:
             continue
         row_text = " ".join(c.get_text(strip=True) for c in cells)
         for cell in cells:
             candidate = sanitize_text(cell.get_text(strip=True))
-            if is_corporate_insurer(candidate):
-                reg_no = extract_reg_number(row_text) or re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
+            if is_life_insurer(candidate):
+                reg_match = re.search(r"(?:reg(?:istration)?\.?\s*(?:no\.?)?[:\s]*)?\b(1\d\d|[2-5]\d\d)\b", row_text, re.IGNORECASE)
+                reg_no = reg_match.group(1) if reg_match else re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
                 page_insurers[candidate] = {
                     "insurer_id": f"INS_{reg_no}",
                     "insurer_name": candidate,
@@ -93,16 +84,16 @@ def extract_entities_from_page(soup: BeautifulSoup) -> Dict[str, Dict[str, str]]
                     "status": "ACTIVE"
                 }
 
-    # 2. Check for Drupal Views rows, cards, and list-items
-    view_rows = content_area.find_all(["div", "article", "li"], class_=re.compile(r"(views-row|views-col|item-list|card|entity)"))
-    for item in view_rows:
-        text_block = item.get_text(separator=" ", strip=True)
-        # Search for headings or primary anchor tags
-        anchors = item.find_all(["h2", "h3", "h4", "a", "strong"])
-        for a in anchors:
-            candidate = sanitize_text(a.get_text(strip=True))
-            if is_corporate_insurer(candidate):
-                reg_no = extract_reg_number(text_block) or re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
+    # 2. Search Semantic Cards & Views Rows
+    containers = soup.find_all(["div", "article", "li"], class_=re.compile(r"(views-row|field-content|item|card|entity)"))
+    for container in containers:
+        container_text = container.get_text(separator=" ", strip=True)
+        anchors = container.find_all(["a", "h2", "h3", "h4", "strong"])
+        for tag in anchors:
+            candidate = sanitize_text(tag.get_text(strip=True))
+            if is_life_insurer(candidate):
+                reg_match = re.search(r"(?:reg(?:istration)?\.?\s*(?:no\.?)?[:\s]*)?\b(1\d\d|[2-5]\d\d)\b", container_text, re.IGNORECASE)
+                reg_no = reg_match.group(1) if reg_match else re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
                 if candidate not in page_insurers:
                     page_insurers[candidate] = {
                         "insurer_id": f"INS_{reg_no}",
@@ -111,13 +102,15 @@ def extract_entities_from_page(soup: BeautifulSoup) -> Dict[str, Dict[str, str]]
                         "status": "ACTIVE"
                     }
 
-    # 3. Fallback: Parse distinct content links inside main view
-    if len(page_insurers) < 2:
-        for a in content_area.find_all("a", href=True):
+    # 3. Direct Anchor Search
+    if not page_insurers:
+        for a in soup.find_all("a"):
             candidate = sanitize_text(a.get_text(strip=True))
-            if is_corporate_insurer(candidate) and candidate not in page_insurers:
-                parent_text = a.parent.get_text(separator=" ", strip=True) if a.parent else ""
-                reg_no = extract_reg_number(parent_text) or re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
+            if is_life_insurer(candidate) and candidate not in page_insurers:
+                parent = a.find_parent(["div", "li", "tr", "section"])
+                parent_text = parent.get_text(separator=" ", strip=True) if parent else ""
+                reg_match = re.search(r"(?:reg(?:istration)?\.?\s*(?:no\.?)?[:\s]*)?\b(1\d\d|[2-5]\d\d)\b", parent_text, re.IGNORECASE)
+                reg_no = reg_match.group(1) if reg_match else re.sub(r"[^A-Za-z0-9]", "", candidate)[:10].upper()
                 page_insurers[candidate] = {
                     "insurer_id": f"INS_{reg_no}",
                     "insurer_name": candidate,
@@ -134,38 +127,57 @@ def scrape_registered_life_insurers() -> List[Dict[str, str]]:
     session.headers.update(HEADERS)
 
     all_insurers: Dict[str, Dict[str, str]] = {}
-    
-    # Direct traversal across Drupal Views pagination pages (0 to 9)
-    for page_idx in range(10):
-        url = BASE_IRDAI_URL if page_idx == 0 else f"{BASE_IRDAI_URL}?page={page_idx}"
-        logger.info("Crawling page %d: %s", page_idx + 1, url)
+    visited_urls: Set[str] = set()
+    urls_to_visit = [BASE_IRDAI_URL]
 
+    page_idx = 0
+    max_pages = 10
+
+    while urls_to_visit and page_idx < max_pages:
+        current_url = urls_to_visit.pop(0)
+        if current_url in visited_urls:
+            continue
+        visited_urls.add(current_url)
+        page_idx += 1
+
+        logger.info("Crawling page %d: %s", page_idx, current_url)
         try:
-            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp = session.get(current_url, timeout=REQUEST_TIMEOUT)
             if resp.status_code != 200:
-                logger.info("Page %d returned status %d. Halting pagination.", page_idx + 1, resp.status_code)
-                break
+                logger.warning("HTTP %d received for %s. Skipping page.", resp.status_code, current_url)
+                continue
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            page_records = extract_entities_from_page(soup)
-            
-            # Check how many NEW records were found on this page
+            page_records = extract_entities_from_soup(soup)
             new_records = {k: v for k, v in page_records.items() if k not in all_insurers}
             logger.info("Extracted %d items from page (%d new).", len(page_records), len(new_records))
-            
-            if not new_records and page_idx > 0:
-                # If a page offers no new distinct records, the end of the listing has been reached
-                logger.info("No new records on page %d. Ending crawl.", page_idx + 1)
+
+            if not new_records and page_idx > 1:
+                logger.info("No new records on page %d. Ending crawl.", page_idx)
                 break
 
             all_insurers.update(new_records)
 
+            # Discover pagination links
+            pagination_nav = soup.find(["ul", "nav", "div"], class_=re.compile(r"(pager|pagination)"))
+            if pagination_nav:
+                for link in pagination_nav.find_all("a", href=True):
+                    next_href = link["href"]
+                    full_url = urljoin(BASE_IRDAI_URL, next_href)
+                    if full_url not in visited_urls and "page=" in full_url:
+                        urls_to_visit.append(full_url)
+            else:
+                if page_idx == 1 and len(page_records) > 0:
+                    for p in range(1, 5):
+                        p_url = f"{BASE_IRDAI_URL}?page={p}"
+                        if p_url not in visited_urls:
+                            urls_to_visit.append(p_url)
+
         except Exception as exc:
-            logger.error("Error scraping %s: %s", url, exc)
-            break
+            logger.error("Error scraping page %s: %s", current_url, exc)
 
     logger.info("Crawling finished. Total unique life insurers discovered: %d", len(all_insurers))
-    
+
     if not all_insurers:
         raise RuntimeError("IRDAI crawl completed, but zero life insurance entities were extracted.")
 
