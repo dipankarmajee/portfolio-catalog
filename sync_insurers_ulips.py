@@ -1,6 +1,6 @@
 """
 Service: sync_insurers_ulips.py
-Purpose: Ingests all IRDAI regulated entities and ULIP funds into SQLite.
+Purpose: Ingests all IRDAI regulated entities, life insurers, and ULIP SFIN funds into SQLite.
 """
 
 import os
@@ -17,6 +17,7 @@ logging.basicConfig(
 )
 
 from scrapers.irdai_scraper import scrape_all_regulated_entities
+from scrapers.life_council_scraper import scrape_all_ulip_funds
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "master_insurers_ulips.sqlite")
@@ -104,10 +105,7 @@ def init_db(conn: sqlite3.Connection):
                 PRIMARY KEY (table_name, column_name)
             )
         """)
-        
-        # Purge any stale header artifact from previous runs
-        conn.execute("DELETE FROM master_regulated_entities WHERE entity_name LIKE 'Name of the%' OR reg_number = 'NAMEOFTHEF'")
-        
+
         all_docs = [('master_regulated_entities', *d) for d in REGULATED_ENTITIES_DOCS] + \
                    [('master_insurers', *d) for d in INSURERS_DOCS] + \
                    [('master_ulip_funds', *d) for d in ULIP_DOCS]
@@ -124,12 +122,15 @@ def sync():
 
     now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
 
+    # 1. Scrape all regulated entities dynamically
     all_entities: List[Dict] = []
     try:
         all_entities = scrape_all_regulated_entities()
         logging.info("Dynamic scrape succeeded: %d total entities collected.", len(all_entities))
     except Exception as exc:
         logging.error("Failed to scrape regulated entities: %s", exc)
+
+    deduped_life_insurers: List[Dict] = []
 
     if all_entities:
         entity_rows = [
@@ -146,7 +147,6 @@ def sync():
             for e in all_entities
         ]
         with conn:
-            # Wipe before full refresh to ensure no stale artifacts linger
             conn.execute("DELETE FROM master_regulated_entities")
             conn.executemany("""
                 INSERT OR REPLACE INTO master_regulated_entities 
@@ -155,7 +155,7 @@ def sync():
             """, entity_rows)
         logging.info("Saved %d total regulated entities to master_regulated_entities.", len(entity_rows))
 
-        # Deduplicate Life Insurers strictly by registration number
+        # Filter and deduplicate Life Insurers
         life_insurers_map: Dict[str, Dict] = {}
         for e in all_entities:
             if "LIFE" in e["category"] and "NON_LIFE" not in e["category"]:
@@ -189,8 +189,37 @@ def sync():
             """, insurer_rows)
         logging.info("Successfully refreshed master_insurers with %d verified Life Insurers.", len(insurer_rows))
 
-    else:
-        logging.warning("No records returned. Database remains unchanged.")
+    # 2. Dynamic ULIP SFIN Ingestion
+    if deduped_life_insurers:
+        ulip_funds: List[Dict] = []
+        try:
+            ulip_funds = scrape_all_ulip_funds(deduped_life_insurers)
+        except Exception as exc:
+            logging.error("Failed to scrape ULIP SFIN funds: %s", exc)
+
+        if ulip_funds:
+            fund_rows = [
+                (
+                    f["sfin"],
+                    f["fund_name"],
+                    f["insurer_id"],
+                    f.get("inception_date", None),
+                    f["latest_nav"],
+                    f["nav_date"],
+                    f.get("status", "ACTIVE"),
+                    now_iso
+                )
+                for f in ulip_funds
+            ]
+            with conn:
+                conn.executemany("""
+                    INSERT OR REPLACE INTO master_ulip_funds 
+                    (sfin, fund_name, insurer_id, inception_date, latest_nav, nav_date, status, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, fund_rows)
+            logging.info("Successfully synced %d ULIP funds to master_ulip_funds.", len(fund_rows))
+        else:
+            logging.info("ULIP crawler finished. No new ULIP SFIN records returned for this date cycle.")
 
     conn.close()
 
