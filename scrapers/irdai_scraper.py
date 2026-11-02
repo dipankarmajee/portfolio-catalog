@@ -6,7 +6,7 @@ Purpose: 100% Dynamic crawler discovering and extracting all IRDAI regulated ent
 import logging
 import sys
 import re
-from typing import List, Dict, Set
+from typing import List, Dict
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
@@ -39,7 +39,6 @@ class SSLHonorAdapter(HTTPAdapter):
         return super().init_poolmanager(*args, **kwargs)
 
 def sanitize_english_text(raw_text: str) -> str:
-    """Extracts and normalizes English text from mixed Hindi-English cells."""
     cleaned = " ".join(raw_text.split()).strip()
     english_segments = re.findall(r"[A-Za-z0-9\s\.\,\-\(\)\&\/\:\@]+", cleaned)
     candidate = " ".join(" ".join(english_segments).split()).strip()
@@ -53,10 +52,6 @@ def clean_company_name(name_raw: str) -> str:
     return cleaned
 
 def discover_regulated_entity_sections(session: requests.Session) -> Dict[str, str]:
-    """
-    100% Dynamic discovery: Scrapes all child links under Regulated Entities
-    from the portal navigation. Zero hardcoded dictionary defaults.
-    """
     logger.info("Discovering Regulated Entities sections dynamically from %s...", SEED_URL)
     sections: Dict[str, str] = {}
     
@@ -66,12 +61,10 @@ def discover_regulated_entity_sections(session: requests.Session) -> Dict[str, s
 
     soup = BeautifulSoup(resp.text, "html.parser")
     
-    # Extract links that represent directory listings under Regulated Entities
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         text = " ".join(a.get_text().split()).strip()
         
-        # Match entity links and skip informational guidelines / javascript links
         is_entity_href = any(k in href for k in ["-insurers", "reinsurer", "broker", "corporate-agent", "telemarketer"])
         is_informational = any(k in href for k in ["about-", "requirements-", "lapsed-", "guidelines"])
         
@@ -79,19 +72,16 @@ def discover_regulated_entity_sections(session: requests.Session) -> Dict[str, s
             full_url = urljoin(BASE_PORTAL_URL, href)
             cat_key = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_").upper()
             
-            # Keep unique categories and avoid duplicate URLs
             if cat_key not in sections and full_url not in sections.values():
                 sections[cat_key] = full_url
 
     logger.info("Dynamically discovered %d distinct entity sections: %s", len(sections), list(sections.keys()))
-    
     if not sections:
         raise RuntimeError("Dynamic menu discovery completed but found 0 entity sections.")
 
     return sections
 
 def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[Dict[str, str]]:
-    """Extracts entities from tables on a single page."""
     entities = []
     tables = soup.find_all("table")
 
@@ -103,31 +93,27 @@ def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[
 
             cell_texts = [" ".join(c.get_text().split()).strip() for c in cells]
             
-            # Detect registration number
             reg_candidate = None
             for txt in cell_texts:
-                match = re.search(r"\b(1\d\d|[2-5]\d\d|\d{2,6}|[A-Z0-9\/\-]{4,15})\b", txt)
-                # Pure numbers or official statutory formats
-                if re.match(r"^\d{1,4}$", txt) and int(txt) > 0 and int(txt) < 1000:
+                if re.match(r"^\d{1,4}$", txt) and 0 < int(txt) < 1000:
                     reg_candidate = txt
                     break
 
-            # Detect company name
             name_candidate = None
             for txt in cell_texts:
                 eng = clean_company_name(txt)
-                # Match company designations or entity titles
                 if len(eng) > 6 and any(term in eng.lower() for term in ["insurance", "assurance", "corporation", "ltd", "limited", "broker", "reinsurance", "co."]):
                     name_candidate = eng
                     break
 
-            # Fallback name selection from non-numeric text
             if not name_candidate:
-                non_num_candidates = [clean_company_name(t) for t in cell_texts if len(clean_company_name(t)) > 6 and not re.match(r"^[\d\s\-\/\.]+$", t)]
+                non_num_candidates = [
+                    clean_company_name(t) for t in cell_texts
+                    if len(clean_company_name(t)) > 6 and not re.match(r"^[\d\s\-\/\.]+$", t)
+                ]
                 if non_num_candidates:
                     name_candidate = non_num_candidates[0]
 
-            # Detect website
             website_url = ""
             for a in tr.find_all("a", href=True):
                 if a["href"].startswith("http"):
@@ -149,7 +135,6 @@ def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[
     return entities
 
 def scrape_all_regulated_entities() -> List[Dict[str, str]]:
-    """Crawls all discovered categories across all pages."""
     session = requests.Session()
     session.mount("https://", SSLHonorAdapter())
     session.headers.update(HEADERS)
@@ -160,9 +145,8 @@ def scrape_all_regulated_entities() -> List[Dict[str, str]]:
     for cat_name, cat_url in sections.items():
         logger.info("--- Crawling Category: %s (%s) ---", cat_name, cat_url)
         page_idx = 0
-        consecutive_empty = 0
 
-        while page_idx < 15:  # Maximum 15 pages per category guardrail
+        while page_idx < 15:
             p_url = cat_url if page_idx == 0 else f"{cat_url}?page={page_idx}"
             try:
                 resp = session.get(p_url, timeout=REQUEST_TIMEOUT)
@@ -182,10 +166,8 @@ def scrape_all_regulated_entities() -> List[Dict[str, str]]:
                 logger.info("Category %s [Page %d]: Extracted %d entities (%d new).", cat_name, page_idx + 1, len(page_entities), new_count)
 
                 if new_count == 0:
-                    logger.info("Page %d yielded 0 new entities. Moving to next category.", page_idx + 1)
-                        break
-                else:
-                    consecutive_empty = 0
+                    logger.info("Category %s: Page %d yielded 0 new entities. Moving to next category.", cat_name, page_idx + 1)
+                    break
 
             except Exception as exc:
                 logger.error("Error reading %s: %s", p_url, exc)
@@ -197,7 +179,6 @@ def scrape_all_regulated_entities() -> List[Dict[str, str]]:
     return list(all_discovered.values())
 
 def scrape_registered_life_insurers() -> List[Dict[str, str]]:
-    """Compatibility adapter for sync_insurers_ulips.py returning Life Insurers."""
     all_entities = scrape_all_regulated_entities()
     life_insurers = [
         {
@@ -209,7 +190,7 @@ def scrape_registered_life_insurers() -> List[Dict[str, str]]:
             "source_url": e["source_url"],
             "status": e["status"]
         }
-        for e in all_entities if "LIFE" in e["category"]
+        for e in all_entities if "LIFE" in e["category"] and "NON_LIFE" not in e["category"]
     ]
     logger.info("Filtered %d Life Insurer corporate records for master_insurers.", len(life_insurers))
     return life_insurers
