@@ -105,6 +105,9 @@ def init_db(conn: sqlite3.Connection):
             )
         """)
         
+        # Purge any stale header artifact from previous runs
+        conn.execute("DELETE FROM master_regulated_entities WHERE entity_name LIKE 'Name of the%' OR reg_number = 'NAMEOFTHEF'")
+        
         all_docs = [('master_regulated_entities', *d) for d in REGULATED_ENTITIES_DOCS] + \
                    [('master_insurers', *d) for d in INSURERS_DOCS] + \
                    [('master_ulip_funds', *d) for d in ULIP_DOCS]
@@ -143,6 +146,8 @@ def sync():
             for e in all_entities
         ]
         with conn:
+            # Wipe before full refresh to ensure no stale artifacts linger
+            conn.execute("DELETE FROM master_regulated_entities")
             conn.executemany("""
                 INSERT OR REPLACE INTO master_regulated_entities 
                 (entity_id, entity_name, reg_number, category, website, source_url, status, updated_at)
@@ -150,7 +155,7 @@ def sync():
             """, entity_rows)
         logging.info("Saved %d total regulated entities to master_regulated_entities.", len(entity_rows))
 
-        # Filter and deduplicate Life Insurers strictly by registration number
+        # Deduplicate Life Insurers strictly by registration number
         life_insurers_map: Dict[str, Dict] = {}
         for e in all_entities:
             if "LIFE" in e["category"] and "NON_LIFE" not in e["category"]:
@@ -185,7 +190,7 @@ def sync():
         logging.info("Successfully refreshed master_insurers with %d verified Life Insurers.", len(insurer_rows))
 
     else:
-        logging.warning("No records returned. Table master_insurers remains unchanged.")
+        logging.warning("No records returned. Database remains unchanged.")
 
     conn.close()
 

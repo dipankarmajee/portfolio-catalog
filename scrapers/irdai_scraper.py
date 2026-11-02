@@ -132,7 +132,13 @@ def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[
 
             # Explicitly reject table header text captured by fallback
             lower_name = name_candidate.lower()
-            if any(h in lower_name for h in ["regn. no", "regn no", "sl. no", "sl no", "name of insurer", "name of the insurer", "registration no", "company name"]):
+            if lower_name.startswith("name of") or any(
+                h in lower_name for h in [
+                    "regn. no", "regn no", "sl. no", "sl no", "s. no", "s no",
+                    "name of insurer", "name of the insurer", "name of the foreign",
+                    "registration no", "company name", "lloyd s india service company"
+                ]
+            ):
                 continue
 
             website_url = ""
@@ -143,7 +149,7 @@ def parse_table_page(soup: BeautifulSoup, category: str, page_url: str) -> List[
 
             clean_reg = reg_candidate if reg_candidate else re.sub(r"[^A-Za-z0-9]", "", name_candidate)[:10].upper()
             
-            if clean_reg.lower() in {"regnno", "slno", "sno", "regno"}:
+            if clean_reg.lower() in {"regnno", "slno", "sno", "regno", "nameno", "nameofthef"}:
                 continue
 
             entities.append({
