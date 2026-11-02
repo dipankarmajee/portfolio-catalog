@@ -1,6 +1,6 @@
 """
-Service: sync_insurers_ulips.py (100% Dynamic)
-Source: Life Insurance Council Member Registry
+Service: sync_insurers_ulips.py
+Source: Life Insurance Council Member Registry (lifeinscouncil.org)
 """
 
 import os
@@ -19,26 +19,26 @@ DB_PATH = os.path.join(BASE_DIR, "data", "master_insurers_ulips.sqlite")
 
 COUNCIL_MEMBERS_URL = "https://www.lifeinscouncil.org/members.aspx"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
 INSURERS_DOCS = [
-    ("insurer_id", "TEXT", 1, "Unique Insurer Identifier"),
-    ("insurer_name", "TEXT", 0, "Registered Life Insurance Corporation Name"),
-    ("reg_number", "TEXT", 0, "IRDAI Registration Sequence Number"),
-    ("status", "TEXT", 0, "Regulatory Status (ACTIVE / INACTIVE)"),
-    ("updated_at", "TEXT", 0, "Sync Timestamp (ISO 8601)")
+    ("insurer_id", "TEXT", 1, "Unique statutory insurer code"),
+    ("insurer_name", "TEXT", 0, "Registered life insurance corporation name"),
+    ("reg_number", "TEXT", 0, "IRDAI registration number"),
+    ("status", "TEXT", 0, "Regulatory status (ACTIVE)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
 ]
 
 ULIP_DOCS = [
     ("sfin", "TEXT", 1, "16-character Segregated Fund Identification Number"),
-    ("fund_name", "TEXT", 0, "Official Fund Description"),
+    ("fund_name", "TEXT", 0, "Official public fund name"),
     ("insurer_id", "TEXT", 0, "Foreign key -> master_insurers.insurer_id"),
-    ("inception_date", "TEXT", 0, "Inception Date (YYYY-MM-DD)"),
-    ("latest_nav", "REAL", 0, "Latest declared NAV"),
-    ("nav_date", "TEXT", 0, "Valuation Date (YYYY-MM-DD)"),
-    ("status", "TEXT", 0, "Fund Status (ACTIVE / CLOSED)"),
-    ("updated_at", "TEXT", 0, "Sync Timestamp (ISO 8601)")
+    ("inception_date", "TEXT", 0, "Launch date (YYYY-MM-DD)"),
+    ("latest_nav", "REAL", 0, "Latest closing NAV per unit"),
+    ("nav_date", "TEXT", 0, "Valuation date (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "Fund status (ACTIVE / CLOSED)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)")
 ]
 
 def init_db(conn: sqlite3.Connection):
@@ -83,59 +83,7 @@ def init_db(conn: sqlite3.Connection):
             VALUES (?, ?, ?, ?, ?)
         """, all_docs)
 
-def fetch_dynamic_insurers() -> List[Dict]:
-    logging.info("Harvesting life insurers from Life Insurance Council directory...")
+def fetch_insurers() -> List[Dict]:
+    logging.info("Retrieving insurers directory from Life Insurance Council...")
     try:
-        resp = requests.get(COUNCIL_MEMBERS_URL, headers=HEADERS, timeout=25)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        
-        insurers = []
-        for tag in soup.find_all("a", href=True):
-            href = tag["href"]
-            text = tag.get_text(strip=True)
-            if "members_details.aspx" in href and len(text) > 4:
-                # Extract registration or create unique slug
-                raw_id = href.split("=")[-1] if "=" in href else re.sub(r"[^A-Za-z0-9]", "", text)[:8].upper()
-                insurers.append({
-                    "insurer_id": raw_id,
-                    "insurer_name": text,
-                    "reg_number": raw_id if raw_id.isdigit() else None,
-                    "status": "ACTIVE"
-                })
-        
-        # Deduplicate by insurer_id
-        unique_insurers = {i["insurer_id"]: i for i in insurers}.values()
-        return list(unique_insurers)
-    except Exception as e:
-        logging.error("Failed to scrape Life Insurance Council: %s", e)
-        return []
-
-def sync():
-    os.makedirs(os.path.join(BASE_DIR, "data"), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    init_db(conn)
-
-    insurers = fetch_dynamic_insurers()
-    now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
-
-    if insurers:
-        rows = [
-            (i["insurer_id"], i["insurer_name"], i["reg_number"], i["status"], now_iso)
-            for i in insurers
-        ]
-        with conn:
-            conn.executemany("""
-                INSERT INTO master_insurers (insurer_id, insurer_name, reg_number, status, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(insurer_id) DO UPDATE SET
-                    insurer_name=excluded.insurer_name,
-                    status=excluded.status,
-                    updated_at=excluded.updated_at
-            """, rows)
-
-    conn.close()
-    logging.info("Synced %d insurers dynamically.", len(insurers))
-
-if __name__ == "__main__":
-    sync()
+        resp = requests.get(COUNCIL_MEMBERS_URL, headers=HEADERS, timeout
