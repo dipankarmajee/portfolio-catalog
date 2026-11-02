@@ -51,12 +51,11 @@ def clean_text(raw_text: str) -> str:
 def parse_ulip_table(soup: BeautifulSoup, insurer_reg: str, default_date: str) -> List[Dict]:
     """
     Dynamically identifies table rows containing valid SFIN identifiers.
-    SFIN format: ULIF followed by alphanumeric segments or 16-character statutory codes.
+    SFIN format: ULIF followed by alphanumeric segments or standard 16-char statutory codes.
     """
     funds = []
     tables = soup.find_all("table")
 
-    # Regular expression for IRDAI SFIN pattern
     sfin_pattern = re.compile(r"\b(ULI[FP][A-Z0-9\/\-]{8,20}|[A-Z]{3,4}\d{2,6}[A-Z0-9\/\-]{6,16})\b", re.IGNORECASE)
 
     for table in tables:
@@ -106,7 +105,6 @@ def parse_ulip_table(soup: BeautifulSoup, insurer_reg: str, default_date: str) -
                 date_match = re.search(r"\b(\d{2}[-\/]\d{2}[-\/]\d{4}|\d{4}[-\/]\d{2}[-\/]\d{2})\b", txt)
                 if date_match:
                     raw_d = date_match.group(1).replace("/", "-")
-                    # Normalize to YYYY-MM-DD
                     if len(raw_d.split("-")[0]) == 2:
                         d_parts = raw_d.split("-")
                         date_candidate = f"{d_parts[2]}-{d_parts[1]}-{d_parts[0]}"
@@ -196,8 +194,8 @@ def scrape_all_ulip_funds(active_insurers: List[Dict]) -> List[Dict]:
     all_funds: Dict[str, Dict] = {}
 
     for insurer in active_insurers:
-        reg_no = str(insurer["reg_number"]).strip()
-        name = insurer["insurer_name"]
+        reg_no = str(insurer.get("reg_number", "")).strip()
+        name = insurer.get("insurer_name") or insurer.get("entity_name") or ""
 
         funds = scrape_council_ulips_for_insurer(session, reg_no, name)
         logger.info("Insurer %s (Reg %s): Extracted %d ULIP SFIN funds.", name, reg_no, len(funds))
