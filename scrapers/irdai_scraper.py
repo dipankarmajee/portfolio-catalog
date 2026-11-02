@@ -1,19 +1,28 @@
 """
 Module: scrapers.irdai_scraper
-Purpose: Live scraping logic for IRDAI Life Insurers Directory.
+Purpose: Live scraping logic for statutory Life Insurers directory.
 """
 
 import logging
+import sys
 from typing import List, Dict
 import requests
 from bs4 import BeautifulSoup
 from urllib3.util import create_urllib3_context
 from requests.adapters import HTTPAdapter
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("scrapers.irdai")
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] [IRDAI_SCRAPER] %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
-IRDAI_URL = "https://irdai.gov.in/list-of-life-insurers"
-REQUEST_TIMEOUT_SECONDS = 30
+# Primary statutory repository and official mirror
+ENDPOINTS = [
+    "https://www.lifeinscouncil.org/industry_info/members.aspx",
+    "https://irdai.gov.in/regulated-entities/life-insurers"
+]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -22,60 +31,60 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
-
 class SSLHonorAdapter(HTTPAdapter):
-    """Ensures compatibility with government portal TLS handshakes on cloud runners."""
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context()
         ctx.load_default_certs()
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
 
-
 def scrape_registered_life_insurers() -> List[Dict[str, str]]:
-    """
-    Scrapes active life insurers directly from IRDAI's directory.
-    
-    Returns:
-        List of dictionaries with insurer_id, insurer_name, reg_number, status.
-        
-    Raises:
-        requests.RequestException: On connection/HTTP errors.
-        RuntimeError: If the table structure is missing or contains no valid rows.
-    """
-    logger.info("Connecting to IRDAI live directory: %s", IRDAI_URL)
     session = requests.Session()
     session.mount("https://", SSLHonorAdapter())
     session.headers.update(HEADERS)
 
-    response = session.get(IRDAI_URL, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
+    last_error = None
+    for url in ENDPOINTS:
+        logger.info("Attempting scrape from statutory endpoint: %s", url)
+        try:
+            resp = session.get(url, timeout=25)
+            logger.info("HTTP Status: %d | Length: %d bytes", resp.status_code, len(resp.content))
+            if resp.status_code != 200:
+                continue
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    table = soup.find("table")
-    if not table:
-        raise RuntimeError(f"No table element discovered on {IRDAI_URL}")
+            soup = BeautifulSoup(resp.text, "html.parser")
+            insurers: List[Dict[str, str]] = []
 
-    insurers: List[Dict[str, str]] = []
-    for row in table.find_all("tr"):
-        cols = row.find_all(["td", "th"])
-        col_texts = [c.get_text(strip=True) for c in cols]
+            # Case A: Table layout (Life Insurance Council or IRDAI table)
+            for tr in soup.find_all("tr"):
+                cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+                if len(cols) >= 2:
+                    # Look for numerical registration or sequence
+                    for val in cols:
+                        if val.isdigit() and 100 <= int(val) <= 600:
+                            reg_num = val
+                            # Find the company name column
+                            name_candidates = [c for c in cols if len(c) > 6 and not c.isdigit()]
+                            if name_candidates:
+                                clean_name = name_candidates[0].split("\n")[0].strip()
+                                insurers.append({
+                                    "insurer_id": f"INS_{reg_num}",
+                                    "insurer_name": clean_name,
+                                    "reg_number": reg_num,
+                                    "status": "ACTIVE"
+                                })
+                            break
 
-        # Expected layout: [Sl No, Regn No, Insurer Name, Registration Date, ...]
-        if len(col_texts) >= 3 and col_texts[1].isdigit():
-            reg_num = col_texts[1].strip()
-            raw_name = col_texts[2].strip()
-            clean_name = " ".join(raw_name.split())
+            # Deduplicate by reg_number
+            unique_insurers = {i["reg_number"]: i for i in insurers}.values()
+            result = list(unique_insurers)
 
-            insurers.append({
-                "insurer_id": f"INS_{reg_num}",
-                "insurer_name": clean_name,
-                "reg_number": reg_num,
-                "status": "ACTIVE"
-            })
+            if len(result) >= 15:
+                logger.info("Successfully extracted %d insurers from %s", len(result), url)
+                return result
 
-    if not insurers:
-        raise RuntimeError("IRDAI table located, but zero valid insurer rows were extracted.")
+        except Exception as e:
+            logger.warning("Endpoint %s failed: %s", url, e)
+            last_error = e
 
-    logger.info("Successfully fetched %d registered insurers from IRDAI.", len(insurers))
-    return insurers
+    raise RuntimeError(f"All statutory insurer endpoints failed or returned 0 rows. Last error: {last_error}")

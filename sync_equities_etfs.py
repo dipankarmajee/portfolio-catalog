@@ -1,42 +1,47 @@
 """
 Service: sync_equities_etfs.py
-Source: Official BSE Listed Securities Directory (api.bseindia.com)
+Source: Official NSE Listed Securities Directory (archives.nseindia.com)
 Pattern: Dynamic fetch first -> Optional fallback on failure -> Graceful exit.
 """
 
+import io
 import os
+import sys
 import json
 import sqlite3
 import logging
 from datetime import datetime
 from typing import List, Dict
 import requests
+import pandas as pd
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [SYNC_EQUITIES] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "master_equities_etfs.sqlite")
 FALLBACK_PATH = os.path.join(BASE_DIR, "config", "fallbacks_equities.json")
 
-BSE_LIST_URL = "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active"
+NSE_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://www.bseindia.com",
-    "Referer": "https://www.bseindia.com/",
     "Connection": "keep-alive"
 }
 
 SCHEMA_DOCS = [
-    ("uid", "TEXT", 1, "Unique primary key: STOCK_{scrip}, ETF_{scrip}, or SGB_{scrip}"),
-    ("symbol", "TEXT", 0, "BSE Numeric Scrip Code"),
+    ("uid", "TEXT", 1, "Unique primary key: STOCK_{symbol}, ETF_{symbol}, or SGB_{symbol}"),
+    ("symbol", "TEXT", 0, "NSE Trading Ticker Symbol"),
     ("ticker_symbol", "TEXT", 0, "Harmonized Ticker Symbol"),
     ("name", "TEXT", 0, "Corporate Security Description"),
     ("category", "TEXT", 0, "Asset Class (STOCK, ETF, SGB)"),
     ("isin", "TEXT", 0, "ISIN Code"),
-    ("exchange", "TEXT", 0, "Exchange (BSE)"),
+    ("exchange", "TEXT", 0, "Exchange (NSE)"),
     ("currency", "TEXT", 0, "Currency (INR)"),
     ("latest_close", "REAL", 0, "Closing Market Price"),
     ("price_date", "TEXT", 0, "Valuation Date (YYYY-MM-DD)"),
@@ -81,55 +86,59 @@ def init_db(conn: sqlite3.Connection):
             VALUES ('master_equities_etfs', ?, ?, ?, ?)
         """, SCHEMA_DOCS)
 
-def fetch_live_bse_catalog() -> List[Dict]:
-    logging.info("Querying live BSE security directory API...")
+def fetch_live_equities() -> List[Dict]:
+    logging.info("Connecting to official equity directory at %s...", NSE_URL)
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # Establish cookie context on main domain
+    # Warm up session cookies on home domain to pass Akamai bot protection
     try:
-        session.get("https://www.bseindia.com", timeout=15)
-    except Exception:
-        pass
+        session.get("https://www.nseindia.com", timeout=15)
+    except Exception as e:
+        logging.warning("Pre-flight handshake warning: %s", e)
 
-    resp = session.get(BSE_LIST_URL, timeout=30)
+    resp = session.get(NSE_URL, timeout=30)
+    logging.info("HTTP Status Code: %d | Content Length: %d bytes", resp.status_code, len(resp.content))
     resp.raise_for_status()
-    data = resp.json()
+
+    df = pd.read_csv(io.StringIO(resp.text))
+    # Normalize potential column name spacing in official file
+    df.columns = [c.strip() for c in df.columns]
 
     records = []
-    for item in data:
-        scrip_cd = str(item.get("SCRIP_CD", "")).strip()
-        ticker = str(item.get("SCRIP_ID", "")).strip()
-        name = str(item.get("Scrip_Name", ticker)).strip()
-        isin = str(item.get("ISIN_NUMBER", "")).strip() or None
-        status_raw = str(item.get("STATUS", "Active")).strip().upper()
+    for _, row in df.iterrows():
+        sym = str(row.get("SYMBOL", "")).strip()
+        name = str(row.get("NAME OF COMPANY", sym)).strip()
+        series = str(row.get("SERIES", "")).strip().upper()
+        isin = str(row.get("ISIN NUMBER", "")).strip() or None
 
-        if not scrip_cd:
+        if not sym:
             continue
 
         category = "STOCK"
-        if "ETF" in name.upper() or "ETF" in ticker.upper():
+        if "ETF" in name.upper() or series == "ETF":
             category = "ETF"
-        elif "SGB" in name.upper() or ticker.upper().startswith("SGB"):
+        elif "SGB" in name.upper() or series == "GB":
             category = "SGB"
 
         records.append({
-            "uid": f"{category}_{scrip_cd}",
-            "symbol": scrip_cd,
-            "ticker_symbol": ticker,
+            "uid": f"{category}_{sym}",
+            "symbol": sym,
+            "ticker_symbol": sym,
             "name": name,
             "category": category,
             "isin": isin,
-            "exchange": "BSE",
+            "exchange": "NSE",
             "currency": "INR",
             "latest_close": None,
             "price_date": datetime.utcnow().strftime("%Y-%m-%d"),
-            "status": "ACTIVE" if status_raw == "ACTIVE" else "INACTIVE"
+            "status": "ACTIVE"
         })
+
+    logging.info("Successfully parsed %d instruments from official catalog.", len(records))
     return records
 
 def load_optional_fallback() -> List[Dict]:
-    """Loads fallback equities if available; otherwise returns an empty list."""
     if not os.path.exists(FALLBACK_PATH):
         logging.info("Optional fallback file %s not found.", FALLBACK_PATH)
         return []
@@ -138,7 +147,7 @@ def load_optional_fallback() -> List[Dict]:
             data = json.load(f)
             return data if isinstance(data, list) else []
     except Exception as e:
-        logging.warning("Failed loading fallback file %s: %s", FALLBACK_PATH, e)
+        logging.warning("Failed loading fallback file: %s", e)
         return []
 
 def sync():
@@ -147,20 +156,12 @@ def sync():
     init_db(conn)
 
     records: List[Dict] = []
-
-    # Step 1: Live fetch
     try:
-        records = fetch_live_bse_catalog()
-        logging.info("Dynamic BSE fetch succeeded: %d securities gathered.", len(records))
-    except Exception as e:
-        logging.error("Live BSE fetch failed: %s. Checking optional fallback...", e)
+        records = fetch_live_equities()
+    except Exception as exc:
+        logging.error("Live fetch failed: %s. Checking optional fallback...", exc)
         records = load_optional_fallback()
-        if records:
-            logging.info("Using fallback data: %d securities loaded.", len(records))
-        else:
-            logging.warning("No fallback records found. Database will remain unchanged.")
 
-    # Step 2: Ingest records if available
     if records:
         now_iso = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
         upsert_rows = [
@@ -171,7 +172,7 @@ def sync():
                 r.get("name", r["symbol"]),
                 r.get("category", "STOCK"),
                 r.get("isin"),
-                r.get("exchange", "BSE"),
+                r.get("exchange", "NSE"),
                 r.get("currency", "INR"),
                 r.get("latest_close"),
                 r.get("price_date", datetime.utcnow().strftime("%Y-%m-%d")),
@@ -180,7 +181,6 @@ def sync():
             )
             for r in records if "symbol" in r
         ]
-
         with conn:
             conn.executemany("""
                 INSERT INTO master_equities_etfs (
@@ -196,7 +196,9 @@ def sync():
                     status=excluded.status,
                     updated_at=excluded.updated_at
             """, upsert_rows)
-        logging.info("BSE catalog synced with %d records.", len(upsert_rows))
+        logging.info("Equities catalog updated with %d records.", len(upsert_rows))
+    else:
+        logging.warning("No equity records available to insert. Database remains unchanged.")
 
     conn.close()
 
