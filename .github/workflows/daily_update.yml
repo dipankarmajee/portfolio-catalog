@@ -2,8 +2,14 @@ name: Daily Master Catalog Update
 
 on:
   schedule:
-    - cron: '30 16 * * *'
+    - cron: '30 16 * * *' # Daily at 16:30 UTC (10:00 PM IST)
   workflow_dispatch:
+  push:
+    branches:
+      - main # Change to 'master' if your default branch is master
+    paths-ignore:
+      - 'data/**' # Prevents infinite build loops when the bot pushes updated databases
+      - '*.md'    # Optional: skip runs on documentation edits
 
 permissions:
   contents: write
