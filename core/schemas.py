@@ -1,0 +1,144 @@
+"""
+core/schemas.py
+Central registry of schema documentation metadata for all SQLite catalog tables.
+Format per column: (column_name, data_type, is_primary_key, description)
+"""
+
+SCHEMA_EQUITIES = [
+    ("uid", "TEXT", 1, "Unique primary key: {ASSET_CLASS}_{SYMBOL}"),
+    ("symbol", "TEXT", 0, "Trading ticker symbol"),
+    ("ticker_symbol", "TEXT", 0, "Normalized exchange ticker symbol"),
+    ("name", "TEXT", 0, "Clean English security name"),
+    ("category", "TEXT", 0, "Asset class (STOCK, ETF, SGB)"),
+    ("country", "TEXT", 0, "Country of origin (IND, USA, GLOBAL)"),
+    ("isin", "TEXT", 0, "Official International Securities Identification Number"),
+    ("exchange", "TEXT", 0, "Listing exchange (NSE, NASDAQ, NYSE)"),
+    ("currency", "TEXT", 0, "Trading currency (INR, USD)"),
+    ("latest_close", "REAL", 0, "Latest closing price in INR (if available from official Bhavdata)"),
+    ("price_date", "TEXT", 0, "Valuation date (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "Trading status (ACTIVE, INACTIVE)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
+SCHEMA_MUTUAL_FUNDS = [
+    ("uid", "TEXT", 1, "Unique primary key: MF_{scheme_code}"),
+    ("scheme_code", "TEXT", 0, "Official AMFI numeric scheme code"),
+    ("isin_div_payout_or_growth", "TEXT", 0, "ISIN Growth / Payout"),
+    ("isin_div_reinvestment", "TEXT", 0, "ISIN Reinvestment"),
+    ("scheme_name", "TEXT", 0, "Full clean English scheme description"),
+    ("amc_name", "TEXT", 0, "Asset Management Company"),
+    ("category", "TEXT", 0, "SEBI Scheme Classification"),
+    ("country", "TEXT", 0, "Country of origin (IND)"),
+    ("currency", "TEXT", 0, "Currency (INR)"),
+    ("nav", "REAL", 0, "Latest Net Asset Value per unit in INR"),
+    ("nav_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "ACTIVE if valid positive NAV present, else INACTIVE"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
+SCHEMA_FIXED_INCOME = [
+    ("uid", "TEXT", 1, "Unique primary key: FI_{scheme_code}"),
+    ("scheme_code", "TEXT", 0, "Canonical code (e.g. PPF, SSY, EPF, SCSS, US_TREASURY_10Y)"),
+    ("scheme_name", "TEXT", 0, "Full clean English scheme title"),
+    ("issuer", "TEXT", 0, "Statutory issuer or monetary authority"),
+    ("category", "TEXT", 0, "Classification (e.g. SMALL_SAVINGS, RETIREMENT, TREASURY_BILL, POLICY_RATE)"),
+    ("country", "TEXT", 0, "Sovereign jurisdiction (IND, USA, GLOBAL)"),
+    ("currency", "TEXT", 0, "Denomination currency (INR, USD)"),
+    ("interest_rate_percent", "REAL", 0, "Annualized interest rate or yield in percentage"),
+    ("senior_citizen_rate_percent", "REAL", 0, "Special senior citizen rate if applicable, else base rate"),
+    ("compounding_frequency", "TEXT", 0, "Compounding interval: ANNUAL, QUARTERLY, MONTHLY, SIMPLE"),
+    ("payout_frequency", "TEXT", 0, "Payout schedule: AT_MATURITY, ANNUAL, QUARTERLY, MONTHLY"),
+    ("min_tenure_months", "INTEGER", 0, "Minimum lock-in tenure in months"),
+    ("max_tenure_months", "INTEGER", 0, "Maximum maturity tenure in months (0 if open-ended)"),
+    ("min_deposit", "REAL", 0, "Minimum deposit amount"),
+    ("max_deposit", "REAL", 0, "Maximum deposit limit (0 if unlimited)"),
+    ("tax_treatment", "TEXT", 0, "Tax status: EEE, EET, TAXABLE"),
+    ("tax_section", "TEXT", 0, "Statutory tax exemption section (e.g. 80C, 10(11))"),
+    ("effective_from", "TEXT", 0, "Effective start date for current rate (YYYY-MM-DD)"),
+    ("formula_notes", "TEXT", 0, "Calculation rules, compounding method, and statutory conditions"),
+    ("status", "TEXT", 0, "Scheme status (ACTIVE, MATURED)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
+SCHEMA_NPS = [
+    ("uid", "TEXT", 1, "Unique primary key: NPS_{scheme_code}"),
+    ("scheme_code", "TEXT", 0, "Official PFRDA / NPS Trust scheme code"),
+    ("scheme_name", "TEXT", 0, "Full clean English NPS scheme title"),
+    ("pfm_name", "TEXT", 0, "Pension Fund Manager name (e.g. SBI, HDFC, ICICI, UTI)"),
+    ("tier", "TEXT", 0, "NPS Account Tier: TIER_I, TIER_II, ALL_CITIZEN, GOVERNMENT"),
+    ("asset_class", "TEXT", 0, "Statutory Asset Class: E, C, G, A"),
+    ("country", "TEXT", 0, "Country of origin (IND)"),
+    ("currency", "TEXT", 0, "Currency (INR)"),
+    ("latest_nav", "REAL", 0, "Latest Net Asset Value per unit in INR"),
+    ("nav_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
+    ("return_1y", "REAL", 0, "1-year annualized return percentage (if disclosed)"),
+    ("return_3y", "REAL", 0, "3-year annualized return percentage (if disclosed)"),
+    ("return_5y", "REAL", 0, "5-year annualized return percentage (if disclosed)"),
+    ("tax_section", "TEXT", 0, "Income Tax benefit (80CCD(1), 80CCD(1B), 80CCD(2))"),
+    ("status", "TEXT", 0, "Scheme status (ACTIVE, CLOSED)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
+SCHEMA_COMMODITIES = [
+    ("uid", "TEXT", 1, "Unique primary key: COMMODITY_{symbol}"),
+    ("symbol", "TEXT", 0, "Unique symbol identifier (e.g. GOLD_999, SILVER_999)"),
+    ("name", "TEXT", 0, "Full clean English title"),
+    ("commodity_type", "TEXT", 0, "Commodity category: GOLD, SILVER, PLATINUM"),
+    ("purity", "TEXT", 0, "Purity grade (e.g. 999 (24K), 916 (22K))"),
+    ("unit", "TEXT", 0, "Measurement unit: 10_GRAMS, 1_KG, TROY_OUNCE"),
+    ("country", "TEXT", 0, "Benchmark country (IND, GLOBAL)"),
+    ("currency", "TEXT", 0, "Trading currency (INR, USD)"),
+    ("rate", "REAL", 0, "Current spot / benchmark rate"),
+    ("rate_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
+    ("high_all_time", "REAL", 0, "All-time highest recorded benchmark rate"),
+    ("low_all_time", "REAL", 0, "All-time lowest recorded benchmark rate"),
+    ("source", "TEXT", 0, "Authoritative benchmark source (IBJA, LBMA)"),
+    ("status", "TEXT", 0, "Trading status (ACTIVE)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
+SCHEMA_CRYPTO = [
+    ("uid", "TEXT", 1, "Unique primary key: CRYPTO_{symbol}"),
+    ("symbol", "TEXT", 0, "Ticker symbol in uppercase (e.g. BTC, ETH)"),
+    ("name", "TEXT", 0, "Full asset title (e.g. Bitcoin, Ethereum)"),
+    ("market_cap_rank", "INTEGER", 0, "Global market cap rank"),
+    ("price_inr", "REAL", 0, "Spot price in INR"),
+    ("price_usd", "REAL", 0, "Spot price in USD"),
+    ("high_24h_inr", "REAL", 0, "24-hour high price in INR"),
+    ("low_24h_inr", "REAL", 0, "24-hour low price in INR"),
+    ("price_change_24h_percent", "REAL", 0, "24-hour percentage price change"),
+    ("market_cap_inr", "REAL", 0, "Total market capitalization in INR"),
+    ("volume_24h_inr", "REAL", 0, "24-hour trading volume in INR"),
+    ("price_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "Trading status (ACTIVE)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
+SCHEMA_INSURERS = [
+    ("insurer_id", "TEXT", 1, "Unique primary key: INS_{reg_number}"),
+    ("insurer_name", "TEXT", 0, "Official clean English life insurance company title"),
+    ("reg_number", "TEXT", 0, "IRDAI certificate of registration number"),
+    ("category", "TEXT", 0, "Regulatory category: LIFE_INSURERS"),
+    ("website", "TEXT", 0, "Official corporate domain"),
+    ("source_url", "TEXT", 0, "Source IRDAI registry endpoint"),
+    ("status", "TEXT", 0, "Operational status (ACTIVE)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
+SCHEMA_ULIPS = [
+    ("sfin", "TEXT", 1, "Segregated Fund Identification Number (Statutory IRDAI key)"),
+    ("fund_name", "TEXT", 0, "Official clean English ULIP fund title"),
+    ("commercial_product_name", "TEXT", 0, "Enriched commercial retail plan title"),
+    ("statutory_uin", "TEXT", 0, "IRDAI approved Unique Identification Number"),
+    ("inception_date", "TEXT", 0, "Statutory inception date parsed directly from SFIN (YYYY-MM-DD)"),
+    ("insurer_id", "TEXT", 0, "Foreign key to master_insurers.insurer_id"),
+    ("latest_nav", "REAL", 0, "Latest Net Asset Value in INR"),
+    ("nav_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
+    ("nav_all_time_high", "REAL", 0, "Highest recorded NAV across all captured cycles"),
+    ("nav_all_time_low", "REAL", 0, "Lowest recorded NAV across all captured cycles"),
+    ("nav_avg", "REAL", 0, "Historical average NAV"),
+    ("nav_52w_high", "REAL", 0, "52-week trailing peak NAV"),
+    ("nav_52w_low", "REAL", 0, "52-week trailing trough NAV"),
+    ("status", "TEXT", 0, "Fund status (ACTIVE, CLOSED)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]

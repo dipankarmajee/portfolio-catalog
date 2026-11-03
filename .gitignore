@@ -1,6 +1,5 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
 *.py[cod]
 *$py.class
 
@@ -153,3 +152,8 @@ cython_debug/
 *.swo
 .DS_Store
 Thumbs.db
+
+
+# Generated database catalogs and documentation
+data/
+documentation/

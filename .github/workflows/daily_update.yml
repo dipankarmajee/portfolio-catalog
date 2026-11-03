@@ -10,8 +10,8 @@ on:
       - 'data/**'
       - 'documentation/**'
   schedule:
-    # 23:45 IST (11:45 PM IST) Mon-Fri -> 18:15 UTC
-    - cron: '15 18 * * 1-5'
+    # 23:30 IST (11:30 PM IST) Mon-Fri -> 18:00 UTC
+    - cron: '0 18 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -37,32 +37,17 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Ensure Target Directories Exist
-        run: mkdir -p data documentation
+        run: mkdir -p data documentation fallback
 
-      - name: Run Pipeline Syncs
-        run: |
-          # 1. Sync Mutual Funds (AMFI)
-          if [ -f sync_mutual_funds.py ]; then python sync_mutual_funds.py; fi
-
-          # 2. Sync Equities, ETFs & SGBs (NSE)
-          if [ -f sync_equities_etfs.py ]; then python sync_equities_etfs.py; fi
-
-          # 3. Sync IRDAI Regulated Entities & Statutory Insurers
-          if [ -f sync_irdai.py ]; then python sync_irdai.py; fi
-
-          # 4. Sync ULIP Funds, Commercial Products & Analytics
-          python sync_insurers_ulips.py
-
-      - name: Regenerate Catalog Schema Documentation
-        run: |
-          if [ -f generate_schema_docs.py ]; then python generate_schema_docs.py; fi
+      - name: Run Master Catalog Pipeline
+        run: python orchestrator.py --all
 
       - name: Commit & Push Changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add data/*.sqlite documentation/DATABASE_SCHEMA.md
+          git add -f data/*.sqlite documentation/DATABASE_SCHEMA.md
 
           if git diff --staged --quiet; then
             echo "No changes detected across databases or schema documentation."
