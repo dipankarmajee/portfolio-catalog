@@ -26,6 +26,7 @@ portfolio-catalog/
 ├── core/                         # Shared core framework & utilities
 │   ├── config.py                 # Filepaths, default timeouts, user-agents
 │   ├── enums.py                  # Domain enums (AssetClass, Country, Currency, Exchange, Status)
+│   ├── constants.py              # Centralized token vocabularies, regex patterns, statutory mapping registries
 │   ├── urls.py                   # Centralized official source endpoint registry
 │   ├── http_client.py            # Resilient HTTP requests with backoff retries & connection pooling
 │   ├── text_utils.py             # English-only normalization, Devanagari stripping, identifier builder
@@ -55,7 +56,8 @@ portfolio-catalog/
 │   ├── master_mutual_funds.sqlite
 │   ├── master_fixed_income.sqlite
 │   ├── master_nps.sqlite
-│   ├── master_commodities_crypto.sqlite
+│   ├── master_commodities.sqlite
+│   ├── master_crypto.sqlite
 │   └── master_insurers_ulips.sqlite
 ├── documentation/
 │   └── DATABASE_SCHEMA.md        # Comprehensive auto-generated catalog report

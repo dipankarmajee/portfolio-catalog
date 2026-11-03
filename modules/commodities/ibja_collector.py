@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup
 
+from core.constants import BULLION_METADATA
 from core.database import register_schema_documentation, transaction
 from core.enums import (
     CommodityPurity,
@@ -28,16 +29,6 @@ from core.text_utils import generate_canonical_uid
 from core.urls import GLOBAL_SPOT_GOLD_URL, GLOBAL_SPOT_SILVER_URL, IBJA_RATES_PORTAL_URL
 
 logger = logging.getLogger(__name__)
-
-BULLION_METADATA = {
-    "GOLD 999": ("GOLD_999_10G", "Gold 24K (999 Purity) - 10g", CommodityType.GOLD.value, CommodityPurity.PURITY_999.value, CommodityUnit.GRAM_10.value),
-    "GOLD 995": ("GOLD_995_10G", "Gold 24K (995 Purity) - 10g", CommodityType.GOLD.value, CommodityPurity.PURITY_995.value, CommodityUnit.GRAM_10.value),
-    "GOLD 916": ("GOLD_916_10G", "Gold 22K (916 Purity / Hallmark) - 10g", CommodityType.GOLD.value, CommodityPurity.PURITY_916.value, CommodityUnit.GRAM_10.value),
-    "GOLD 750": ("GOLD_750_10G", "Gold 18K (750 Purity) - 10g", CommodityType.GOLD.value, CommodityPurity.PURITY_750.value, CommodityUnit.GRAM_10.value),
-    "GOLD 585": ("GOLD_585_10G", "Gold 14K (585 Purity) - 10g", CommodityType.GOLD.value, CommodityPurity.PURITY_585.value, CommodityUnit.GRAM_10.value),
-    "SILVER 999": ("SILVER_999_1KG", "Silver (999 Purity) - 1kg", CommodityType.SILVER.value, CommodityPurity.PURITY_999.value, CommodityUnit.KG_1.value),
-    "PLATINUM 999": ("PLATINUM_999_10G", "Platinum (999 Purity) - 10g", CommodityType.PLATINUM.value, CommodityPurity.PURITY_999.value, CommodityUnit.GRAM_10.value),
-}
 
 
 def init_commodities_schema(conn):

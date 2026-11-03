@@ -125,3 +125,20 @@ class CommodityPurity(str, Enum):
 
 class InsurerCategory(str, Enum):
     LIFE_INSURERS = "LIFE_INSURERS"
+
+
+class UlipCategory(str, Enum):
+    EQUITY = "EQUITY"
+    DEBT = "DEBT"
+    BALANCED = "BALANCED"
+    MONEY_MARKET = "MONEY_MARKET"
+    PENSION = "PENSION"
+    DISCONTINUED = "DISCONTINUED"
+    OTHER = "OTHER"
+
+
+class UlipFundType(str, Enum):
+    INDIVIDUAL = "INDIVIDUAL"
+    GROUP = "GROUP"
+    DISCONTINUED = "DISCONTINUED"
+

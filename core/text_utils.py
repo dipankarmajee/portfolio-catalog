@@ -7,19 +7,11 @@ import re
 import unicodedata
 from typing import Optional
 
-
-# Regex matching Devanagari / Hindi script Unicode range (\u0900 - \u097F)
-DEVANAGARI_PATTERN = re.compile(r"[\u0900-\u097F]+")
-
-# Excessive whitespace / control characters
-WHITESPACE_PATTERN = re.compile(r"\s+")
-
-# Corporate legal suffixes for normalization
-STOPWORDS_CORPORATE = {
-    "company", "co", "limited", "ltd", "pvt", "private",
-    "corporation", "corp", "insurance", "life", "of", "india",
-    "services", "ins", "general", "assurance"
-}
+from core.constants import (
+    DEVANAGARI_PATTERN,
+    STOPWORDS_CORPORATE,
+    WHITESPACE_PATTERN,
+)
 
 
 def clean_english_text(text: Optional[str]) -> str:
@@ -64,7 +56,7 @@ generate_canonical_uid = canonicalize_identifier
 
 def clean_corporate_tokens(name: str) -> str:
     """
-    Extracts key sorting/matching tokens for fuzzy corporate entity resolution.
+    Extracts key sorting/matching tokens for deterministic corporate entity resolution.
     """
     if not name:
         return ""

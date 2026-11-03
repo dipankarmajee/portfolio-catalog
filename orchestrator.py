@@ -9,7 +9,8 @@ import sys
 import time
 
 from core.config import (
-    DB_COMMODITIES_CRYPTO,
+    DB_COMMODITIES,
+    DB_CRYPTO,
     DB_EQUITIES_ETFS,
     DB_FIXED_INCOME,
     DB_INSURERS_ULIPS,
@@ -78,7 +79,7 @@ def run_nps():
 
 def run_commodities():
     logger.info("=== Starting Commodities Sync ===")
-    conn = get_connection(DB_COMMODITIES_CRYPTO)
+    conn = get_connection(DB_COMMODITIES)
     try:
         comm_count = sync_commodities(conn)
         logger.info("Commodities Complete: %d benchmarks.", comm_count)
@@ -88,7 +89,7 @@ def run_commodities():
 
 def run_crypto():
     logger.info("=== Starting Crypto Sync ===")
-    conn = get_connection(DB_COMMODITIES_CRYPTO)
+    conn = get_connection(DB_CRYPTO)
     try:
         crypto_count = sync_crypto(conn)
         logger.info("Crypto Complete: %d assets.", crypto_count)

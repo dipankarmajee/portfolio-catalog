@@ -11,11 +11,11 @@ from typing import Dict, List
 
 from bs4 import BeautifulSoup
 
+from core.constants import RBI_RATE_TARGETS
 from core.enums import (
     CompoundingFrequency,
     Country,
     Currency,
-    FixedIncomeCategory,
     InstrumentStatus,
     PayoutFrequency,
     TaxTreatment,
@@ -25,12 +25,6 @@ from core.text_utils import generate_canonical_uid
 from core.urls import RBI_HOME_URL
 
 logger = logging.getLogger(__name__)
-
-RBI_RATE_TARGETS = [
-    ("RBI_REPO_RATE", r"policy\s+repo\s+rate", "RBI Policy Repo Rate", FixedIncomeCategory.POLICY_RATE.value),
-    ("RBI_BANK_RATE", r"bank\s+rate", "RBI Bank Rate Benchmark", FixedIncomeCategory.POLICY_RATE.value),
-    ("RBI_REVERSE_REPO", r"reverse\s+repo\s+rate", "RBI Fixed Reverse Repo Rate", FixedIncomeCategory.POLICY_RATE.value),
-]
 
 
 class RBIScraper:

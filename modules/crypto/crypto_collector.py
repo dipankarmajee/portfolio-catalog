@@ -16,9 +16,25 @@ from core.enums import InstrumentStatus
 from core.http_client import create_resilient_session
 from core.schemas import SCHEMA_CRYPTO
 from core.text_utils import clean_english_text, generate_canonical_uid
-from core.urls import COINCAP_ASSETS_URL, COINGECKO_TOP_URL
+from core.urls import COINCAP_ASSETS_URL, COINGECKO_TOP_URL, USD_INR_EXCHANGE_RATE_URL
 
 logger = logging.getLogger(__name__)
+
+
+def fetch_live_usd_inr_rate(session: requests.Session) -> Optional[float]:
+    """
+    Dynamically fetches live USD/INR exchange rate from official financial market feed.
+    """
+    try:
+        resp = session.get(USD_INR_EXCHANGE_RATE_URL, timeout=10)
+        if resp.status_code == 200:
+            meta = resp.json().get("chart", {}).get("result", [{}])[0].get("meta", {})
+            price = meta.get("regularMarketPrice")
+            if price and float(price) > 0:
+                return float(price)
+    except Exception as e:
+        logger.debug("Live USD/INR exchange rate query notice: %s", e)
+    return None
 
 
 def init_crypto_schema(conn):
@@ -69,7 +85,7 @@ def fetch_coingecko_crypto() -> List[Dict]:
     records: List[Dict] = []
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    usd_inr_rate = 83.50
+    usd_inr_rate = fetch_live_usd_inr_rate(session)
 
     for c in coins:
         symbol = str(c.get("symbol", "")).strip().upper()
@@ -78,7 +94,7 @@ def fetch_coingecko_crypto() -> List[Dict]:
             continue
 
         price_inr = c.get("current_price")
-        price_usd = round(price_inr / usd_inr_rate, 4) if price_inr else None
+        price_usd = round(price_inr / usd_inr_rate, 4) if (price_inr and usd_inr_rate) else None
 
         records.append({
             "uid": generate_canonical_uid("CRYPTO", symbol),
@@ -114,13 +130,13 @@ def fetch_coincap_fallback() -> List[Dict]:
     records: List[Dict] = []
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    usd_inr_rate = 83.50
+    usd_inr_rate = fetch_live_usd_inr_rate(session)
 
     for item in data:
         symbol = str(item.get("symbol", "")).strip().upper()
         name = clean_english_text(item.get("name", symbol))
         price_usd = float(item.get("priceUsd", 0)) or None
-        price_inr = round(price_usd * usd_inr_rate, 2) if price_usd else None
+        price_inr = round(price_usd * usd_inr_rate, 2) if (price_usd and usd_inr_rate) else None
         rank = int(item.get("rank", 0)) or None
 
         records.append({
@@ -133,8 +149,8 @@ def fetch_coincap_fallback() -> List[Dict]:
             "high_24h_inr": None,
             "low_24h_inr": None,
             "price_change_24h_percent": float(item.get("changePercent24Hr", 0)) or None,
-            "market_cap_inr": float(item.get("marketCapUsd", 0)) * usd_inr_rate if item.get("marketCapUsd") else None,
-            "volume_24h_inr": float(item.get("volumeUsd24Hr", 0)) * usd_inr_rate if item.get("volumeUsd24Hr") else None,
+            "market_cap_inr": float(item.get("marketCapUsd", 0)) * usd_inr_rate if (item.get("marketCapUsd") and usd_inr_rate) else None,
+            "volume_24h_inr": float(item.get("volumeUsd24Hr", 0)) * usd_inr_rate if (item.get("volumeUsd24Hr") and usd_inr_rate) else None,
             "price_date": today_iso,
             "status": InstrumentStatus.ACTIVE.value,
             "updated_at": now_iso,

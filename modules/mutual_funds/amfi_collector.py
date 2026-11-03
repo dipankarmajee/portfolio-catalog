@@ -24,9 +24,10 @@ def init_mutual_funds_schema(conn):
             CREATE TABLE IF NOT EXISTS master_mutual_funds (
                 uid TEXT PRIMARY KEY,
                 scheme_code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                scheme_name TEXT NOT NULL,
                 isin_div_payout_or_growth TEXT,
                 isin_div_reinvestment TEXT,
-                scheme_name TEXT NOT NULL,
                 amc_name TEXT,
                 category TEXT,
                 country TEXT DEFAULT 'IND',
@@ -37,7 +38,14 @@ def init_mutual_funds_schema(conn):
                 updated_at TEXT NOT NULL
             )
         """)
+        cursor.execute("PRAGMA table_info(master_mutual_funds)")
+        cols = {r[1] for r in cursor.fetchall()}
+        if "name" not in cols:
+            cursor.execute("ALTER TABLE master_mutual_funds ADD COLUMN name TEXT")
+            cursor.execute("UPDATE master_mutual_funds SET name = scheme_name WHERE name IS NULL")
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_mf_code ON master_mutual_funds(scheme_code)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_mf_name ON master_mutual_funds(name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_mf_status ON master_mutual_funds(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_mf_category ON master_mutual_funds(category)")
     register_schema_documentation(conn, "master_mutual_funds", SCHEMA_MUTUAL_FUNDS)
@@ -121,9 +129,10 @@ def fetch_amfi_mutual_funds() -> List[Dict]:
             records.append({
                 "uid": canonicalize_identifier("MF", scheme_code),
                 "scheme_code": scheme_code,
+                "name": scheme_name,
+                "scheme_name": scheme_name,
                 "isin_div_payout_or_growth": isin_growth,
                 "isin_div_reinvestment": isin_reinv,
-                "scheme_name": scheme_name,
                 "amc_name": current_amc,
                 "category": current_category,
                 "country": Country.INDIA.value,
@@ -142,21 +151,26 @@ def sync_amfi_mutual_funds(conn) -> int:
     init_mutual_funds_schema(conn)
     funds = fetch_amfi_mutual_funds()
 
+    for f in funds:
+        if "name" not in f:
+            f["name"] = f.get("scheme_name", "")
+
     batch_size = 1000
     with transaction(conn) as cursor:
         for i in range(0, len(funds), batch_size):
             batch = funds[i:i + batch_size]
             cursor.executemany("""
                 INSERT INTO master_mutual_funds (
-                    uid, scheme_code, isin_div_payout_or_growth, isin_div_reinvestment,
-                    scheme_name, amc_name, category, country, currency, nav,
+                    uid, scheme_code, name, scheme_name, isin_div_payout_or_growth, isin_div_reinvestment,
+                    amc_name, category, country, currency, nav,
                     nav_date, status, updated_at
                 ) VALUES (
-                    :uid, :scheme_code, :isin_div_payout_or_growth, :isin_div_reinvestment,
-                    :scheme_name, :amc_name, :category, :country, :currency, :nav,
+                    :uid, :scheme_code, :name, :scheme_name, :isin_div_payout_or_growth, :isin_div_reinvestment,
+                    :amc_name, :category, :country, :currency, :nav,
                     :nav_date, :status, :updated_at
                 )
                 ON CONFLICT(scheme_code) DO UPDATE SET
+                    name = excluded.name,
                     isin_div_payout_or_growth = excluded.isin_div_payout_or_growth,
                     isin_div_reinvestment = excluded.isin_div_reinvestment,
                     scheme_name = excluded.scheme_name,

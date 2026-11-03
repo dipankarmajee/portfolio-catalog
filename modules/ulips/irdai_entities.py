@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
+from core.constants import URL_EXTRACT_PATTERN
 from core.enums import InsurerCategory
 from core.http_client import create_resilient_session
 from core.text_utils import clean_english_text
@@ -54,8 +55,18 @@ class IRDAIEntityScraper:
 
             website_url = None
             link = tr.find("a", href=True)
-            if link:
+            if link and ("http" in link["href"] or "www" in link["href"]):
                 website_url = link["href"].strip()
+            else:
+                for td in tr.find_all("td"):
+                    td_text = td.get_text().strip()
+                    m = URL_EXTRACT_PATTERN.search(td_text)
+                    if m:
+                        url = m.group(0).rstrip("./")
+                        if url.lower().startswith("www."):
+                            url = "https://" + url
+                        website_url = url
+                        break
 
             count += 1
             yield {

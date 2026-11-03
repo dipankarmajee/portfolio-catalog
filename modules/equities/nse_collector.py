@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import io
 import logging
 
+from core.constants import NSE_EXCLUDED_SERIES
 from core.database import register_schema_documentation, transaction
 from core.enums import AssetClass, Country, Currency, Exchange, InstrumentStatus
 from core.http_client import create_resilient_session
@@ -64,7 +65,7 @@ def sync_nse_equities_and_etfs(conn) -> int:
     for row in reader:
         symbol = (row.get("SYMBOL") or "").strip()
         series = (row.get(" SERIES") or row.get("SERIES") or "").strip().upper()
-        if not symbol or series in ("SM", "ST"):
+        if not symbol or series in NSE_EXCLUDED_SERIES:
             continue
 
         name = clean_english_text(row.get("NAME OF COMPANY") or symbol)

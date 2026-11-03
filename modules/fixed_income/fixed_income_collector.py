@@ -25,6 +25,7 @@ def init_fixed_income_schema(conn):
             CREATE TABLE IF NOT EXISTS master_fixed_income (
                 uid TEXT PRIMARY KEY,
                 scheme_code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
                 scheme_name TEXT NOT NULL,
                 issuer TEXT NOT NULL,
                 category TEXT NOT NULL,
@@ -46,7 +47,14 @@ def init_fixed_income_schema(conn):
                 updated_at TEXT NOT NULL
             )
         """)
+        cursor.execute("PRAGMA table_info(master_fixed_income)")
+        cols = {r[1] for r in cursor.fetchall()}
+        if "name" not in cols:
+            cursor.execute("ALTER TABLE master_fixed_income ADD COLUMN name TEXT")
+            cursor.execute("UPDATE master_fixed_income SET name = scheme_name WHERE name IS NULL")
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_fi_code ON master_fixed_income(scheme_code)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_fi_name ON master_fixed_income(name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_fi_cat ON master_fixed_income(category)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_fi_country ON master_fixed_income(country)")
     register_schema_documentation(conn, "master_fixed_income", SCHEMA_FIXED_INCOME)
@@ -71,22 +79,27 @@ def sync_fixed_income(conn) -> int:
         logger.warning("No fixed income schemes retrieved from live endpoints.")
         return 0
 
+    for s in schemes:
+        if "name" not in s:
+            s["name"] = s["scheme_name"]
+
     with transaction(conn) as cursor:
         cursor.executemany("""
             INSERT INTO master_fixed_income (
-                uid, scheme_code, scheme_name, issuer, category, country, currency,
+                uid, scheme_code, name, scheme_name, issuer, category, country, currency,
                 interest_rate_percent, senior_citizen_rate_percent,
                 compounding_frequency, payout_frequency, min_tenure_months,
                 max_tenure_months, min_deposit, max_deposit, tax_treatment,
                 tax_section, effective_from, formula_notes, status, updated_at
             ) VALUES (
-                :uid, :scheme_code, :scheme_name, :issuer, :category, :country, :currency,
+                :uid, :scheme_code, :name, :scheme_name, :issuer, :category, :country, :currency,
                 :interest_rate_percent, :senior_citizen_rate_percent,
                 :compounding_frequency, :payout_frequency, :min_tenure_months,
                 :max_tenure_months, :min_deposit, :max_deposit, :tax_treatment,
                 :tax_section, :effective_from, :formula_notes, :status, :updated_at
             )
             ON CONFLICT(scheme_code) DO UPDATE SET
+                name = excluded.name,
                 scheme_name = excluded.scheme_name,
                 issuer = excluded.issuer,
                 category = excluded.category,

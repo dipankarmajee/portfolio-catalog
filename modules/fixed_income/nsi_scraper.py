@@ -13,14 +13,12 @@ import urllib3
 
 from bs4 import BeautifulSoup
 
+from core.constants import NSI_SCHEME_PATTERNS as SCHEME_PATTERNS
 from core.enums import (
-    CompoundingFrequency,
     Country,
     Currency,
     FixedIncomeCategory,
     InstrumentStatus,
-    PayoutFrequency,
-    TaxTreatment,
 )
 from core.http_client import create_resilient_session
 from core.text_utils import clean_english_text, generate_canonical_uid
@@ -28,34 +26,6 @@ from core.urls import NSI_SCHEMES_OVERVIEW_URL, NSI_SCHEMES_RATES_URL
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logger = logging.getLogger(__name__)
-
-# Scheme mapping definitions for parsing NSI tables dynamically
-SCHEME_PATTERNS = [
-    ("PPF", r"public\s+provident\s+fund", "Public Provident Fund", 180, 0, 500.0, 150000.0,
-     CompoundingFrequency.ANNUAL.value, PayoutFrequency.AT_MATURITY.value, TaxTreatment.EEE.value, "80C, 10(11)"),
-    ("SSY", r"sukanya\s+samriddhi", "Sukanya Samriddhi Account", 252, 252, 250.0, 150000.0,
-     CompoundingFrequency.ANNUAL.value, PayoutFrequency.AT_MATURITY.value, TaxTreatment.EEE.value, "80C, 10(11A)"),
-    ("SCSS", r"senior\s+citizen", "Senior Citizen Savings Scheme", 60, 96, 1000.0, 3000000.0,
-     CompoundingFrequency.QUARTERLY.value, PayoutFrequency.QUARTERLY.value, TaxTreatment.TAXABLE.value, "80C"),
-    ("NSC", r"national\s+savings?\s+certificate", "National Savings Certificate (VIII Issue)", 60, 60, 1000.0, 0.0,
-     CompoundingFrequency.ANNUAL.value, PayoutFrequency.AT_MATURITY.value, TaxTreatment.TAXABLE.value, "80C"),
-    ("KVP", r"kisan\s+vikas\s+patra", "Kisan Vikas Patra", 115, 115, 1000.0, 0.0,
-     CompoundingFrequency.ANNUAL.value, PayoutFrequency.AT_MATURITY.value, TaxTreatment.TAXABLE.value, None),
-    ("POMIS", r"monthly\s+income\s+account", "Post Office Monthly Income Scheme", 60, 60, 1000.0, 900000.0,
-     CompoundingFrequency.MONTHLY.value, PayoutFrequency.MONTHLY.value, TaxTreatment.TAXABLE.value, None),
-    ("POTD_1Y", r"1\s*year\s*time\s*deposit", "Post Office Time Deposit 1 Year", 12, 12, 1000.0, 0.0,
-     CompoundingFrequency.QUARTERLY.value, PayoutFrequency.ANNUAL.value, TaxTreatment.TAXABLE.value, None),
-    ("POTD_2Y", r"2\s*year\s*time\s*deposit", "Post Office Time Deposit 2 Year", 24, 24, 1000.0, 0.0,
-     CompoundingFrequency.QUARTERLY.value, PayoutFrequency.ANNUAL.value, TaxTreatment.TAXABLE.value, None),
-    ("POTD_3Y", r"3\s*year\s*time\s*deposit", "Post Office Time Deposit 3 Year", 36, 36, 1000.0, 0.0,
-     CompoundingFrequency.QUARTERLY.value, PayoutFrequency.ANNUAL.value, TaxTreatment.TAXABLE.value, None),
-    ("POTD_5Y", r"5\s*year\s*time\s*deposit", "Post Office Time Deposit 5 Year", 60, 60, 1000.0, 0.0,
-     CompoundingFrequency.QUARTERLY.value, PayoutFrequency.ANNUAL.value, TaxTreatment.TAXABLE.value, "80C"),
-    ("PORD", r"recurring\s*deposit", "Post Office Recurring Deposit", 60, 60, 100.0, 0.0,
-     CompoundingFrequency.QUARTERLY.value, PayoutFrequency.AT_MATURITY.value, TaxTreatment.TAXABLE.value, None),
-    ("POSA", r"savings?\s*account", "Post Office Savings Account", 0, 0, 500.0, 0.0,
-     CompoundingFrequency.ANNUAL.value, PayoutFrequency.ANNUAL.value, TaxTreatment.TAXABLE.value, "80TTA"),
-]
 
 
 class NSIScraper:

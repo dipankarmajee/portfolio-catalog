@@ -32,11 +32,18 @@ COINGECKO_TOP_URL = (
     "&price_change_percentage=24h"
 )
 COINCAP_ASSETS_URL = "https://api.coincap.io/v2/assets?limit=100"
+USD_INR_EXCHANGE_RATE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/USDINR=X"
 
 # Insurers & ULIPs
 IRDAI_PORTAL_ROOT = "https://irdai.gov.in"
 IRDAI_LIFE_INSURERS_URL = "https://irdai.gov.in/list-of-life-insurers1"
-IRDAI_LIFE_PRODUCTS_URL = "https://irdai.gov.in/list-of-life-products"
+IRDAI_LIFE_PRODUCTS_URL = (
+    "https://irdai.gov.in/list-of-life-products"
+    "?p_p_id=com_irdai_document_media_IRDAIDocumentMediaPortlet&p_p_lifecycle=0"
+    "&p_p_state=normal&p_p_mode=view"
+    "&_com_irdai_document_media_IRDAIDocumentMediaPortlet_delta=60"
+    "&_com_irdai_document_media_IRDAIDocumentMediaPortlet_resetCur=false"
+)
 LIFE_COUNCIL_NAV_URL = "https://www.lifeinscouncil.org/industry%20information/list_of_fund_NAVs.aspx"
 
 # Fixed Income (Indian Small Savings, US Treasuries, RBI Policy Rates)

@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from modules.commodities.ibja_collector import init_commodities_schema, sync_commodities
-from modules.crypto.crypto_collector import init_crypto_schema, sync_crypto
+from modules.crypto.crypto_collector import fetch_live_usd_inr_rate, init_crypto_schema, sync_crypto
 
 
 class TestCommoditiesAndCrypto(unittest.TestCase):
@@ -85,6 +85,18 @@ class TestCommoditiesAndCrypto(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertEqual(row[0], 8500000.0)
             self.assertEqual(row[1], 1)
+
+    def test_fetch_live_usd_inr_rate_mocked(self):
+        from unittest.mock import MagicMock
+        session = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "chart": {"result": [{"meta": {"regularMarketPrice": 86.42}}]}
+        }
+        session.get.return_value = mock_resp
+        rate = fetch_live_usd_inr_rate(session)
+        self.assertEqual(rate, 86.42)
 
 
 if __name__ == "__main__":

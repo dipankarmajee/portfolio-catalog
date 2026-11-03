@@ -23,9 +23,10 @@ SCHEMA_EQUITIES = [
 SCHEMA_MUTUAL_FUNDS = [
     ("uid", "TEXT", 1, "Unique primary key: MF_{scheme_code}"),
     ("scheme_code", "TEXT", 0, "Official AMFI numeric scheme code"),
+    ("name", "TEXT", 0, "Canonical clean English scheme name for universal client search"),
+    ("scheme_name", "TEXT", 0, "Full clean English scheme description"),
     ("isin_div_payout_or_growth", "TEXT", 0, "ISIN Growth / Payout"),
     ("isin_div_reinvestment", "TEXT", 0, "ISIN Reinvestment"),
-    ("scheme_name", "TEXT", 0, "Full clean English scheme description"),
     ("amc_name", "TEXT", 0, "Asset Management Company"),
     ("category", "TEXT", 0, "SEBI Scheme Classification"),
     ("country", "TEXT", 0, "Country of origin (IND)"),
@@ -39,6 +40,7 @@ SCHEMA_MUTUAL_FUNDS = [
 SCHEMA_FIXED_INCOME = [
     ("uid", "TEXT", 1, "Unique primary key: FI_{scheme_code}"),
     ("scheme_code", "TEXT", 0, "Canonical code (e.g. PPF, SSY, EPF, SCSS, US_TREASURY_10Y)"),
+    ("name", "TEXT", 0, "Canonical clean English scheme title for universal client search"),
     ("scheme_name", "TEXT", 0, "Full clean English scheme title"),
     ("issuer", "TEXT", 0, "Statutory issuer or monetary authority"),
     ("category", "TEXT", 0, "Classification (e.g. SMALL_SAVINGS, RETIREMENT, TREASURY_BILL, POLICY_RATE)"),
@@ -63,6 +65,7 @@ SCHEMA_FIXED_INCOME = [
 SCHEMA_NPS = [
     ("uid", "TEXT", 1, "Unique primary key: NPS_{scheme_code}"),
     ("scheme_code", "TEXT", 0, "Official PFRDA / NPS Trust scheme code"),
+    ("name", "TEXT", 0, "Canonical clean English NPS scheme title for universal client search"),
     ("scheme_name", "TEXT", 0, "Full clean English NPS scheme title"),
     ("pfm_name", "TEXT", 0, "Pension Fund Manager name (e.g. SBI, HDFC, ICICI, UTI)"),
     ("tier", "TEXT", 0, "NPS Account Tier: TIER_I, TIER_II, ALL_CITIZEN, GOVERNMENT"),
@@ -116,6 +119,7 @@ SCHEMA_CRYPTO = [
 
 SCHEMA_INSURERS = [
     ("insurer_id", "TEXT", 1, "Unique primary key: INS_{reg_number}"),
+    ("name", "TEXT", 0, "Canonical clean company name for universal client search"),
     ("insurer_name", "TEXT", 0, "Official clean English life insurance company title"),
     ("reg_number", "TEXT", 0, "IRDAI certificate of registration number"),
     ("category", "TEXT", 0, "Regulatory category: LIFE_INSURERS"),
@@ -127,11 +131,13 @@ SCHEMA_INSURERS = [
 
 SCHEMA_ULIPS = [
     ("sfin", "TEXT", 1, "Segregated Fund Identification Number (Statutory IRDAI key)"),
+    ("name", "TEXT", 0, "Canonical clean searchable title prefixed with insurer name (e.g. SBI Life - Equity Fund)"),
     ("fund_name", "TEXT", 0, "Official clean English ULIP fund title"),
-    ("commercial_product_name", "TEXT", 0, "Enriched commercial retail plan title"),
-    ("statutory_uin", "TEXT", 0, "IRDAI approved Unique Identification Number"),
-    ("inception_date", "TEXT", 0, "Statutory inception date parsed directly from SFIN (YYYY-MM-DD)"),
     ("insurer_id", "TEXT", 0, "Foreign key to master_insurers.insurer_id"),
+    ("insurer_name", "TEXT", 0, "Official registered life insurance company name"),
+    ("category", "TEXT", 0, "Statutory asset classification (EQUITY, DEBT, BALANCED, MONEY_MARKET, PENSION, DISCONTINUED, OTHER)"),
+    ("fund_type", "TEXT", 0, "Statutory fund structure (INDIVIDUAL, GROUP, DISCONTINUED)"),
+    ("inception_date", "TEXT", 0, "Statutory inception date parsed directly from SFIN (YYYY-MM-DD)"),
     ("latest_nav", "REAL", 0, "Latest Net Asset Value in INR"),
     ("nav_date", "TEXT", 0, "Valuation date in ISO format (YYYY-MM-DD)"),
     ("nav_all_time_high", "REAL", 0, "Highest recorded NAV across all captured cycles"),

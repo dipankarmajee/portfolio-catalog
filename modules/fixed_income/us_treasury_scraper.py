@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List
 import xml.etree.ElementTree as ET
 
+from core.constants import TREASURY_SERIES
 from core.enums import (
     CompoundingFrequency,
     Country,
@@ -23,17 +24,6 @@ from core.text_utils import generate_canonical_uid
 from core.urls import US_TREASURY_YIELD_CURVE_URL
 
 logger = logging.getLogger(__name__)
-
-TREASURY_SERIES = [
-    ("US_TREASURY_1M", "US Treasury Bill 1 Month", "BC_1MONTH", 1, 1),
-    ("US_TREASURY_3M", "US Treasury Bill 3 Month", "BC_3MONTH", 3, 3),
-    ("US_TREASURY_6M", "US Treasury Bill 6 Month", "BC_6MONTH", 6, 6),
-    ("US_TREASURY_1Y", "US Treasury Note 1 Year", "BC_1YEAR", 12, 12),
-    ("US_TREASURY_2Y", "US Treasury Note 2 Year", "BC_2YEAR", 24, 24),
-    ("US_TREASURY_5Y", "US Treasury Note 5 Year", "BC_5YEAR", 60, 60),
-    ("US_TREASURY_10Y", "US Treasury Bond 10 Year Benchmark", "BC_10YEAR", 120, 120),
-    ("US_TREASURY_30Y", "US Treasury Long Bond 30 Year", "BC_30YEAR", 360, 360),
-]
 
 
 class USTreasuryScraper:

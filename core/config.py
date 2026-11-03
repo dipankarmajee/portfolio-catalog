@@ -9,19 +9,18 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DOCS_DIR = BASE_DIR / "documentation"
-FALLBACK_DIR = BASE_DIR / "fallback"
 
 # Ensure directories exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DOCS_DIR.mkdir(parents=True, exist_ok=True)
-FALLBACK_DIR.mkdir(parents=True, exist_ok=True)
 
 # Database File Paths
 DB_EQUITIES_ETFS = DATA_DIR / "master_equities_etfs.sqlite"
 DB_MUTUAL_FUNDS = DATA_DIR / "master_mutual_funds.sqlite"
 DB_FIXED_INCOME = DATA_DIR / "master_fixed_income.sqlite"
 DB_NPS = DATA_DIR / "master_nps.sqlite"
-DB_COMMODITIES_CRYPTO = DATA_DIR / "master_commodities_crypto.sqlite"
+DB_COMMODITIES = DATA_DIR / "master_commodities.sqlite"
+DB_CRYPTO = DATA_DIR / "master_crypto.sqlite"
 DB_INSURERS_ULIPS = DATA_DIR / "master_insurers_ulips.sqlite"
 
 # Schema Documentation Output

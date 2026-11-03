@@ -13,7 +13,8 @@ from typing import Dict, List, Optional, Tuple
 
 from core.config import (
     BASE_DIR,
-    DB_COMMODITIES_CRYPTO,
+    DB_COMMODITIES,
+    DB_CRYPTO,
     DB_EQUITIES_ETFS,
     DB_FIXED_INCOME,
     DB_INSURERS_ULIPS,
@@ -47,9 +48,14 @@ CATALOG_DATABASES = [
         "tables": ["master_nps"],
     },
     {
-        "name": "Precious Metals & Digital Assets Catalog",
-        "file": DB_COMMODITIES_CRYPTO,
-        "tables": ["master_commodities", "master_crypto"],
+        "name": "Precious Metals & Bullion Catalog",
+        "file": DB_COMMODITIES,
+        "tables": ["master_commodities"],
+    },
+    {
+        "name": "Crypto & Digital Assets Catalog",
+        "file": DB_CRYPTO,
+        "tables": ["master_crypto"],
     },
     {
         "name": "Insurers & ULIP SFIN Catalog",

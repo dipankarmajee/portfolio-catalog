@@ -11,6 +11,7 @@ import logging
 import re
 from typing import Dict, List, Optional
 
+from core.constants import NPS_ASSET_CLASS_PATTERNS, NPS_TIER_KEYWORDS
 from core.database import register_schema_documentation, transaction
 from core.enums import Country, Currency, InstrumentStatus, NpsAssetClass, NpsTier
 from core.http_client import create_resilient_session
@@ -27,6 +28,7 @@ def init_nps_schema(conn):
             CREATE TABLE IF NOT EXISTS master_nps (
                 uid TEXT PRIMARY KEY,
                 scheme_code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
                 scheme_name TEXT NOT NULL,
                 pfm_name TEXT NOT NULL,
                 tier TEXT NOT NULL,
@@ -45,36 +47,30 @@ def init_nps_schema(conn):
         """)
         cursor.execute("PRAGMA table_info(master_nps)")
         existing = {col[1] for col in cursor.fetchall()}
+        if "name" not in existing:
+            cursor.execute("ALTER TABLE master_nps ADD COLUMN name TEXT")
+            cursor.execute("UPDATE master_nps SET name = scheme_name WHERE name IS NULL")
         for col_name in ("return_1y", "return_3y", "return_5y"):
             if col_name not in existing:
                 cursor.execute(f"ALTER TABLE master_nps ADD COLUMN {col_name} REAL")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_nps_code ON master_nps(scheme_code)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_nps_name ON master_nps(name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_nps_pfm ON master_nps(pfm_name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_nps_tier ON master_nps(tier)")
     register_schema_documentation(conn, "master_nps", SCHEMA_NPS)
 
 
 def _detect_tier(scheme_name: str) -> str:
-    name_upper = scheme_name.upper()
-    if "TIER II" in name_upper or "TIER-II" in name_upper or "TIER 2" in name_upper:
-        return NpsTier.TIER_II.value
-    if "CENTRAL GOVT" in name_upper or "STATE GOVT" in name_upper:
-        return NpsTier.GOVERNMENT.value
-    if "CORPORATE" in name_upper:
-        return NpsTier.CORPORATE.value
+    for pattern, tier_val in NPS_TIER_KEYWORDS:
+        if pattern.search(scheme_name):
+            return tier_val
     return NpsTier.TIER_I.value
 
 
 def _detect_asset_class(scheme_name: str) -> str:
-    name_upper = scheme_name.upper()
-    if re.search(r"\bSCHEME\s+E\b|EQUITY", name_upper):
-        return NpsAssetClass.E.value
-    if re.search(r"\bSCHEME\s+C\b|CORPORATE\s+BOND", name_upper):
-        return NpsAssetClass.C.value
-    if re.search(r"\bSCHEME\s+G\b|GOVT", name_upper):
-        return NpsAssetClass.G.value
-    if re.search(r"\bSCHEME\s+A\b|ALTERNATIVE", name_upper):
-        return NpsAssetClass.A.value
+    for pattern, asset_val in NPS_ASSET_CLASS_PATTERNS:
+        if pattern.search(scheme_name):
+            return asset_val
     return NpsAssetClass.ALL.value
 
 
@@ -133,6 +129,7 @@ def fetch_nps_schemes() -> List[Dict]:
         records.append({
             "uid": uid,
             "scheme_code": code,
+            "name": clean_name,
             "scheme_name": clean_name,
             "pfm_name": pfm_name,
             "tier": tier,
@@ -161,18 +158,23 @@ def sync_nps(conn) -> int:
         logger.warning("No NPS schemes retrieved from live registry.")
         return 0
 
+    for s in schemes:
+        if "name" not in s:
+            s["name"] = s.get("scheme_name", "")
+
     with transaction(conn) as cursor:
         cursor.executemany("""
             INSERT INTO master_nps (
-                uid, scheme_code, scheme_name, pfm_name, tier, asset_class,
+                uid, scheme_code, name, scheme_name, pfm_name, tier, asset_class,
                 country, currency, latest_nav, nav_date, return_1y, return_3y,
                 return_5y, tax_section, status, updated_at
             ) VALUES (
-                :uid, :scheme_code, :scheme_name, :pfm_name, :tier, :asset_class,
+                :uid, :scheme_code, :name, :scheme_name, :pfm_name, :tier, :asset_class,
                 :country, :currency, :latest_nav, :nav_date, :return_1y, :return_3y,
                 :return_5y, :tax_section, :status, :updated_at
             )
             ON CONFLICT(scheme_code) DO UPDATE SET
+                name = excluded.name,
                 scheme_name = excluded.scheme_name,
                 pfm_name = excluded.pfm_name,
                 tier = excluded.tier,
