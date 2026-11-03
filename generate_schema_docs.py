@@ -1,38 +1,69 @@
 """
-Service: generate_schema_docs.py
-Purpose: Generates documentation/DATABASE_SCHEMA.md
+generate_schema_docs.py
+Inspects all master SQLite databases and generates documentation/DATABASE_SCHEMA.md.
 """
 
-import os
-import sqlite3
+from datetime import datetime, timezone
 import json
 import logging
-from datetime import datetime, timezone
+import os
+from pathlib import Path
+import sqlite3
 from typing import Dict, List, Optional, Tuple
 
+from core.config import (
+    BASE_DIR,
+    DB_COMMODITIES,
+    DB_CRYPTO,
+    DB_EQUITIES_ETFS,
+    DB_FIXED_INCOME,
+    DB_INSURERS_ULIPS,
+    DB_MUTUAL_FUNDS,
+    DB_NPS,
+    OUTPUT_DOCS_PATH,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DOCS_DIR = os.path.join(BASE_DIR, "documentation")
-OUTPUT_MD_PATH = os.path.join(DOCS_DIR, "DATABASE_SCHEMA.md")
-
-DATABASES = [
+CATALOG_DATABASES = [
     {
         "name": "Mutual Funds Catalog",
-        "file": os.path.join(BASE_DIR, "data", "master_mutual_funds.sqlite"),
-        "tables": ["master_mutual_funds"]
+        "file": DB_MUTUAL_FUNDS,
+        "tables": ["master_mutual_funds"],
     },
     {
-        "name": "Equities, ETFs & SGBs Catalog",
-        "file": os.path.join(BASE_DIR, "data", "master_equities_etfs.sqlite"),
-        "tables": ["master_equities_etfs"]
+        "name": "Equities, ETFs & SGBs Catalog (India & World)",
+        "file": DB_EQUITIES_ETFS,
+        "tables": ["master_equities_etfs"],
+    },
+    {
+        "name": "Fixed Income & Savings Schemes Catalog",
+        "file": DB_FIXED_INCOME,
+        "tables": ["master_fixed_income"],
+    },
+    {
+        "name": "National Pension System (NPS) Catalog",
+        "file": DB_NPS,
+        "tables": ["master_nps"],
+    },
+    {
+        "name": "Precious Metals & Bullion Catalog",
+        "file": DB_COMMODITIES,
+        "tables": ["master_commodities"],
+    },
+    {
+        "name": "Crypto & Digital Assets Catalog",
+        "file": DB_CRYPTO,
+        "tables": ["master_crypto"],
     },
     {
         "name": "Insurers & ULIP SFIN Catalog",
-        "file": os.path.join(BASE_DIR, "data", "master_insurers_ulips.sqlite"),
-        "tables": ["master_regulated_entities", "master_insurers", "master_ulip_funds"]
-    }
+        "file": DB_INSURERS_ULIPS,
+        "tables": ["master_insurers", "master_ulip_funds"],
+    },
 ]
+
 
 def get_table_metadata(cursor: sqlite3.Cursor, table_name: str) -> List[Tuple[str, str, int, str]]:
     try:
@@ -50,6 +81,7 @@ def get_table_metadata(cursor: sqlite3.Cursor, table_name: str) -> List[Tuple[st
 
     cursor.execute(f"PRAGMA table_info({table_name})")
     return [(row[1], row[2], row[5], "Standard schema attribute") for row in cursor.fetchall()]
+
 
 def get_table_statistics(cursor: sqlite3.Cursor, table_name: str) -> Tuple[int, Optional[str], Optional[int]]:
     cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
@@ -73,6 +105,7 @@ def get_table_statistics(cursor: sqlite3.Cursor, table_name: str) -> Tuple[int, 
 
     return count, latest_update, active_count
 
+
 def get_sample_record(cursor: sqlite3.Cursor, table_name: str) -> Optional[Dict]:
     try:
         cursor.execute(f"SELECT * FROM {table_name} WHERE status = 'ACTIVE' LIMIT 1")
@@ -87,10 +120,11 @@ def get_sample_record(cursor: sqlite3.Cursor, table_name: str) -> Optional[Dict]
         pass
     return None
 
+
 def build_markdown() -> str:
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     lines = [
-        "# Database Schema & Catalog Health Report",
+        "# Database Schema & Master Catalog Health Report",
         "",
         f"> **Automated Documentation** | Generated on `{now_utc}`",
         "",
@@ -101,46 +135,53 @@ def build_markdown() -> str:
         "## Summary Overview",
         "",
         "| Database | Table Name | Total Records | Active Units | Last Synced (UTC) | File Size |",
-        "| :--- | :--- | :--- | :--- | :--- | :--- |"
+        "| :--- | :--- | :--- | :--- | :--- | :--- |",
     ]
 
-    for db in DATABASES:
-        db_path = db["file"]
-        if not os.path.exists(db_path):
+    for db in CATALOG_DATABASES:
+        db_path = Path(db["file"])
+        if not db_path.exists():
             for tbl in db["tables"]:
                 lines.append(f"| {db['name']} | `{tbl}` | *Missing* | *N/A* | *N/A* | 0 KB |")
             continue
 
         file_size_kb = round(os.path.getsize(db_path) / 1024, 2)
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
 
         for tbl in db["tables"]:
-            count, latest_update, active_cnt = get_table_statistics(cur, tbl)
-            sync_str = f"`{latest_update}`" if latest_update else "*N/A*"
-            active_str = f"{active_cnt:,}" if active_cnt is not None else "*N/A*"
-            lines.append(f"| {db['name']} | `{tbl}` | {count:,} | {active_str} | {sync_str} | {file_size_kb:,} KB |")
+            try:
+                count, latest_update, active_cnt = get_table_statistics(cur, tbl)
+                sync_str = f"`{latest_update}`" if latest_update else "*N/A*"
+                active_str = f"{active_cnt:,}" if active_cnt is not None else "*N/A*"
+                lines.append(f"| {db['name']} | `{tbl}` | {count:,} | {active_str} | {sync_str} | {file_size_kb:,} KB |")
+            except sqlite3.OperationalError:
+                lines.append(f"| {db['name']} | `{tbl}` | *Not Initialized* | *N/A* | *N/A* | {file_size_kb:,} KB |")
 
         conn.close()
 
     lines.extend(["", "---", ""])
 
-    for db in DATABASES:
-        db_path = db["file"]
+    for db in CATALOG_DATABASES:
+        db_path = Path(db["file"])
+        rel_path = db_path.relative_to(BASE_DIR).as_posix()
         lines.append(f"## {db['name']}")
-        lines.append(f"- **Local SQLite File:** `{os.path.relpath(db_path, BASE_DIR)}`")
+        lines.append(f"- **Local SQLite File:** `{rel_path}`")
 
-        if not os.path.exists(db_path):
+        if not db_path.exists():
             lines.append("- **Status:** ⚠️ *Database file not generated yet.*\n")
             continue
 
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
 
         for tbl in db["tables"]:
-            count, latest_update, active_cnt = get_table_statistics(cur, tbl)
-            columns = get_table_metadata(cur, tbl)
-            sample = get_sample_record(cur, tbl)
+            try:
+                count, latest_update, active_cnt = get_table_statistics(cur, tbl)
+                columns = get_table_metadata(cur, tbl)
+                sample = get_sample_record(cur, tbl)
+            except sqlite3.OperationalError:
+                continue
 
             lines.extend([
                 "",
@@ -152,7 +193,7 @@ def build_markdown() -> str:
                 "#### Column Definitions",
                 "",
                 "| Column | Type | Primary Key | Description |",
-                "| :--- | :--- | :---: | :--- |"
+                "| :--- | :--- | :---: | :--- |",
             ])
 
             for col_name, data_type, is_pk, description in columns:
@@ -165,7 +206,7 @@ def build_markdown() -> str:
                     "#### Sample Record",
                     "```json",
                     json.dumps(sample, indent=2, default=str),
-                    "```"
+                    "```",
                 ])
 
         conn.close()
@@ -173,11 +214,13 @@ def build_markdown() -> str:
 
     return "\n".join(lines)
 
+
 def run():
-    os.makedirs(DOCS_DIR, exist_ok=True)
-    with open(OUTPUT_MD_PATH, "w", encoding="utf-8") as f:
+    OUTPUT_DOCS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_DOCS_PATH, "w", encoding="utf-8") as f:
         f.write(build_markdown())
-    logging.info("Updated %s successfully.", OUTPUT_MD_PATH)
+    logger.info("Updated %s successfully.", OUTPUT_DOCS_PATH)
+
 
 if __name__ == "__main__":
     run()

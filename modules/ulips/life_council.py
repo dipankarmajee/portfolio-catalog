@@ -1,10 +1,9 @@
 """
-scrapers/life_council_scraper.py
-
-Automated dynamic extractor for Indian ULIP Fund NAVs from the
-Life Insurance Council ASP.NET portal.
+modules/ulips/life_council.py
+Automated extractor for Indian ULIP Fund NAVs from the Life Insurance Council ASP.NET portal.
 """
 
+from datetime import datetime
 import logging
 import re
 from typing import Dict, Generator, List, Optional, Tuple
@@ -13,37 +12,21 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+from core.http_client import create_resilient_session
+from core.text_utils import clean_english_text
+from core.urls import LIFE_COUNCIL_NAV_URL
+
 logger = logging.getLogger(__name__)
-
-PORTAL_URL = "https://www.lifeinscouncil.org/industry%20information/list_of_fund_NAVs.aspx"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Origin": "https://www.lifeinscouncil.org",
-    "Referer": PORTAL_URL,
-}
 
 
 class LifeCouncilScraper:
     def __init__(self, session: Optional[requests.Session] = None):
-        self.session = session or requests.Session()
-        retries = Retry(
-            total=3,
-            backoff_factor=1.0,
-            status_forcelist=[429, 500, 502, 503, 504],
-            raise_on_status=False,
-        )
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        self.session.headers.update(HEADERS)
+        headers = {
+            "Origin": "https://www.lifeinscouncil.org",
+            "Referer": LIFE_COUNCIL_NAV_URL,
+        }
+        self.session = session or create_resilient_session(headers=headers)
 
     @staticmethod
     def _extract_aspnet_tokens(soup: BeautifulSoup) -> Dict[str, str]:
@@ -58,7 +41,6 @@ class LifeCouncilScraper:
     def _clean_sfin(val: str) -> str:
         if not val:
             return ""
-        # Preserve alphanumeric characters and statutory SFIN symbols (+, -, _)
         return re.sub(r"[^A-Za-z0-9+_-]", "", val.strip()).upper()
 
     @staticmethod
@@ -87,11 +69,11 @@ class LifeCouncilScraper:
             return None
 
     def get_initial_page(self) -> Tuple[BeautifulSoup, str, Dict[str, str]]:
-        resp = self.session.get(PORTAL_URL, timeout=30)
+        resp = self.session.get(LIFE_COUNCIL_NAV_URL, timeout=30)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         form = soup.find("form")
-        post_url = urljoin(PORTAL_URL, form.get("action", "")) if form else PORTAL_URL
+        post_url = urljoin(LIFE_COUNCIL_NAV_URL, form.get("action", "")) if form else LIFE_COUNCIL_NAV_URL
         return soup, post_url, self._extract_aspnet_tokens(soup)
 
     def discover_insurers(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
@@ -101,7 +83,7 @@ class LifeCouncilScraper:
         insurers = []
         for opt in select_tag.find_all("option"):
             val = opt.get("value", "").strip()
-            label = opt.get_text(strip=True)
+            label = clean_english_text(opt.get_text())
             if not val or val in ("0", "-1") or re.search(r"select|choose", label, re.I):
                 continue
             insurers.append({"value": val, "name": label})
@@ -129,7 +111,6 @@ class LifeCouncilScraper:
         day_options = []
         for a in cal.find_all("a"):
             href = a.get("href", "")
-            # Filter out month navigation links ('V' prefix) and keep date postbacks
             if "CALnavdate" in href and ",'V" not in href:
                 m = re.search(r"'([^']+)'\)", href)
                 if m:
@@ -160,7 +141,6 @@ class LifeCouncilScraper:
             elif "date" in h:
                 idx_map["nav_date"] = i
 
-        # Fallbacks based on portal layout: ['Sr.no.', 'SFIN', 'Segregated Fund Name', 'NAV Date', 'NAV Per Unit']
         if "sfin" not in idx_map:
             idx_map["sfin"] = 1
         if "fund_name" not in idx_map:
@@ -179,7 +159,7 @@ class LifeCouncilScraper:
             if not raw_sfin or len(raw_sfin) < 5 or raw_sfin == "SFIN":
                 continue
 
-            fund_name = cells[idx_map["fund_name"]].strip()
+            fund_name = clean_english_text(cells[idx_map["fund_name"]])
             latest_nav = self._clean_nav(cells[idx_map["latest_nav"]])
             nav_date = self._parse_iso_date(cells[idx_map["nav_date"]])
 
@@ -195,27 +175,27 @@ class LifeCouncilScraper:
         return funds
 
     def scrape_all_funds(self) -> Generator[Dict, None, None]:
-        init_soup, post_url, _ = self.get_initial_page()
-        insurers = self.discover_insurers(init_soup)
-        logger.info(f"Discovered {len(insurers)} insurers dynamically from portal.")
+        try:
+            init_soup, post_url, _ = self.get_initial_page()
+            insurers = self.discover_insurers(init_soup)
+            logger.info("Discovered %d insurers dynamically from Life Council portal.", len(insurers))
+        except Exception as e:
+            logger.warning("Life Council portal unreachable or offline: %s", e)
+            return
 
         for ins in insurers:
             ins_name = ins["name"]
             ins_val = ins["value"]
-            logger.info(f"Querying ULIP funds for: {ins_name} ({ins_val})")
+            logger.info("Querying ULIP funds for: %s (%s)", ins_name, ins_val)
 
             found_funds = []
             try:
-                # 1. Start with fresh base tokens for each insurer
                 s_base, post_url, _ = self.get_initial_page()
-
-                # 2. Open Calendar
                 s_cal, days = self._open_calendar_and_get_days(s_base, post_url, ins_val)
                 if not days:
-                    logger.warning(f"No calendar days visible for {ins_name}")
+                    logger.warning("No calendar days visible for %s", ins_name)
                     continue
 
-                # 3. Test days in reverse chronological order (skip holidays/weekends dynamically)
                 for day_txt, day_arg in reversed(days):
                     tokens_cal = self._extract_aspnet_tokens(s_cal)
                     payload_sel = {
@@ -233,7 +213,6 @@ class LifeCouncilScraper:
                     txt_el = s_sel.find("input", id=lambda x: x and "txtdateselect" in x.lower())
                     txt_val = txt_el.get("value", "") if txt_el else ""
 
-                    # 4. Click "Get Data"
                     payload_get = {
                         **tokens_sel,
                         "ctl00$txtusername": "",
@@ -250,16 +229,12 @@ class LifeCouncilScraper:
                     funds = self._parse_table(s_data, ins_name)
                     if funds:
                         found_funds = funds
-                        logger.info(
-                            f"Successfully scraped {len(funds)} funds for {ins_name} on date '{txt_val}'."
-                        )
+                        logger.info("Scraped %d funds for %s on date '%s'.", len(funds), ins_name, txt_val)
                         break
 
             except Exception as e:
-                logger.error(f"Error scraping {ins_name}: {e}")
-
-            if not found_funds:
-                logger.info(f"Found 0 records for '{ins_name}'.")
+                logger.error("Error scraping %s: %s", ins_name, e)
 
             for f in found_funds:
                 yield f
+
