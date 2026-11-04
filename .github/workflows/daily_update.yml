@@ -10,8 +10,8 @@ on:
       - 'data/**'
       - 'documentation/**'
   schedule:
-    # 23:30 IST (11:30 PM IST) Mon-Fri -> 18:00 UTC
-    - cron: '0 18 * * 1-5'
+    # 23:35 IST (11:35 PM IST) Mon-Fri -> 18:05 UTC (off-peak minute prevents GitHub queue drops)
+    - cron: '5 18 * * 1-5'
   workflow_dispatch:
 
 permissions:
