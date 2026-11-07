@@ -55,3 +55,23 @@ jobs:
             git commit -m "chore(data): automated daily sync [$(date -u +'%Y-%m-%d %H:%M:%SZ')]"
             git push origin main
           fi
+
+      - name: Publish Master Catalogs to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: latest
+          name: "Latest Master Catalogs & Daily Records"
+          body: "Automated daily master catalogs with latest market records and NAV history."
+          draft: false
+          prerelease: false
+          files: |
+            data/master_equities_etfs.sqlite
+            data/master_mutual_funds.sqlite
+            data/master_fixed_income.sqlite
+            data/master_nps.sqlite
+            data/master_commodities.sqlite
+            data/master_crypto.sqlite
+            data/master_insurers_ulips.sqlite
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
