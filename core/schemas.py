@@ -129,6 +129,17 @@ SCHEMA_INSURERS = [
     ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
 ]
 
+SCHEMA_INSURANCE_PRODUCTS = [
+    ("uin", "TEXT", 1, "IRDAI Unique Identification Number (e.g. 111N1333V03)"),
+    ("product_name", "TEXT", 0, "Full official policy marketing name"),
+    ("name", "TEXT", 0, "Canonical searchable name prefixed with insurer (e.g. SBI Life - Smart Platina Plus)"),
+    ("insurer_name", "TEXT", 0, "Registered life insurance company name"),
+    ("category", "TEXT", 0, "Product type (ULIP, Term Assurance, Endowment, Whole Life, Annuity, Health, Rider, Group, Other)"),
+    ("status", "TEXT", 0, "Regulatory status (ACTIVE, WITHDRAWN)"),
+    ("launch_date", "TEXT", 0, "Date of regulatory approval (YYYY-MM-DD)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
+
 SCHEMA_ULIPS = [
     ("sfin", "TEXT", 1, "Segregated Fund Identification Number (Statutory IRDAI key)"),
     ("name", "TEXT", 0, "Canonical clean searchable title prefixed with insurer name (e.g. SBI Life - Equity Fund)"),

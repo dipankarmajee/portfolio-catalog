@@ -18,6 +18,7 @@ class AssetClass(str, Enum):
     ULIP = "ULIP"
     REIT_INVIT = "REIT_INVIT"
     SGB = "SGB"
+    INSURANCE_PRODUCT = "INSURANCE_PRODUCT"
 
 
 class Country(str, Enum):

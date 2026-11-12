@@ -27,6 +27,7 @@ from modules.fixed_income.fixed_income_collector import sync_fixed_income
 from modules.mutual_funds.amfi_collector import sync_amfi_mutual_funds
 from modules.nps.nps_collector import sync_nps
 from modules.ulips.ulip_collector import sync_insurers_ulips
+from modules.insurance.insurance_collector import sync_insurance_products
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,6 +108,16 @@ def run_ulips():
         conn.close()
 
 
+def run_insurance_products():
+    logger.info("=== Starting IRDAI Life Insurance Products Sync ===")
+    conn = get_connection(DB_INSURERS_ULIPS)
+    try:
+        prod_count = sync_insurance_products(conn)
+        logger.info("Insurance Products Complete: %d official IRDAI products synced.", prod_count)
+    finally:
+        conn.close()
+
+
 def run_all():
     start_time = time.time()
     logger.info("************************************************************")
@@ -150,7 +161,13 @@ def run_all():
     except Exception as e:
         logger.error("ULIPs pipeline error: %s", e)
 
-    # 7. Generate Schema Documentation
+    # 7. IRDAI Life Insurance Products
+    try:
+        run_insurance_products()
+    except Exception as e:
+        logger.error("Insurance products pipeline error: %s", e)
+
+    # 8. Generate Schema Documentation
     logger.info("=== Regenerating Schema Documentation ===")
     try:
         generate_schema_docs.run()
@@ -168,7 +185,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="Run full pipeline across all asset classes")
     parser.add_argument(
         "--module",
-        choices=["equities", "mutual_funds", "fixed_income", "nps", "commodities", "crypto", "ulips"],
+        choices=["equities", "mutual_funds", "fixed_income", "nps", "commodities", "crypto", "ulips", "insurance_products"],
         help="Run a specific asset module"
     )
     parser.add_argument("--docs", action="store_true", help="Regenerate schema documentation only")
@@ -188,6 +205,7 @@ def main():
             "commodities": run_commodities,
             "crypto": run_crypto,
             "ulips": run_ulips,
+            "insurance_products": run_insurance_products,
         }
         module_runners[args.module]()
         generate_schema_docs.run()

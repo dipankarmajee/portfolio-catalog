@@ -58,9 +58,9 @@ CATALOG_DATABASES = [
         "tables": ["master_crypto"],
     },
     {
-        "name": "Insurers & ULIP SFIN Catalog",
+        "name": "Insurers & Insurance Products (Traditional & ULIPs)",
         "file": DB_INSURERS_ULIPS,
-        "tables": ["master_insurers", "master_ulip_funds"],
+        "tables": ["master_insurers", "master_insurance_products", "master_ulip_funds"],
     },
 ]
 
