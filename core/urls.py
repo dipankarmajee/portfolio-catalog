@@ -45,9 +45,9 @@ IRDAI_LIFE_PRODUCTS_URL = (
     "&_com_irdai_document_media_IRDAIDocumentMediaPortlet_resetCur=false"
 )
 LIFE_COUNCIL_NAV_URL = "https://www.lifeinscouncil.org/industry%20information/list_of_fund_NAVs.aspx"
-IRDAI_LIFE_PRODUCTS_LIST_URL = "https://irdai.gov.in/list-of-products-life"
-IRDAI_LIFE_PRODUCTS_ALT_URL = "https://irdai.gov.in/web/guest/list-of-products-life"
-LIFE_COUNCIL_UIN_URL = "https://www.lifeinscouncil.org/industry%20information/UINdetails.aspx"
+IRDAI_LIFE_PRODUCTS_LIST_URL = "https://irdai.gov.in/list-of-life-products"
+IRDAI_LIFE_PRODUCTS_ALT_URL = "https://irdai.gov.in/web/guest/list-of-life-products"
+LIFE_COUNCIL_UIN_URL = "https://www.lifeinscouncil.org/industry%20information/product_of_life_insurers.aspx"
 
 # Fixed Income (Indian Small Savings, US Treasuries, RBI Policy Rates)
 NSI_PORTAL_ROOT = "https://www.nsiindia.gov.in"

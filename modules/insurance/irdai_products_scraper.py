@@ -8,11 +8,14 @@ Fallback source: https://www.lifeinscouncil.org/industry%20information/UINdetail
 No hardcoded product lists — everything is scraped at runtime.
 """
 
+import io
 import logging
 import re
 import time
-from typing import Dict, Generator, List, Optional
+from typing import Dict, Generator, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
+import xml.etree.ElementTree as ET
+import zipfile
 
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
@@ -23,6 +26,7 @@ from core.text_utils import clean_english_text
 from core.urls import (
     IRDAI_LIFE_PRODUCTS_LIST_URL,
     IRDAI_LIFE_PRODUCTS_ALT_URL,
+    IRDAI_LIFE_PRODUCTS_URL,
     LIFE_COUNCIL_UIN_URL,
 )
 
@@ -131,10 +135,13 @@ class IRDAIProductsScraper:
         """
         base = current_url
 
+        def _valid(h: str) -> bool:
+            return bool(h) and not h.strip().startswith(("#", "javascript:"))
+
         # 1. Explicit <link rel="next"> or <a rel="next">
         for tag in soup.find_all(["link", "a"], rel=lambda r: r and "next" in (r if isinstance(r, list) else [r])):
             href = tag.get("href", "")
-            if href:
+            if _valid(href):
                 return urljoin(base, href)
 
         # 2. Anchor tags whose visible text looks like "next"
@@ -143,11 +150,10 @@ class IRDAIProductsScraper:
             txt = a.get_text(strip=True)
             if next_patterns.match(txt):
                 href = a.get("href", "")
-                if href and href != "#":
+                if _valid(href):
                     return urljoin(base, href)
 
         # 3. Liferay-style _cur / delta pagination in query string
-        # Look for a page link that increments the current page number
         parsed = urlparse(current_url)
         qs = parse_qs(parsed.query, keep_blank_values=True)
         cur_key = next(
@@ -156,12 +162,11 @@ class IRDAIProductsScraper:
         if cur_key:
             try:
                 current_page = int(qs[cur_key][0])
-                # Verify we can find a link that points to current_page+1
                 next_page = current_page + 1
                 next_page_links = soup.find_all("a", href=True)
                 for a in next_page_links:
                     href = a.get("href", "")
-                    if f"_cur={next_page}" in href or f"page={next_page}" in href:
+                    if _valid(href) and (f"_cur={next_page}" in href or f"page={next_page}" in href):
                         return urljoin(base, href)
             except (ValueError, IndexError):
                 pass
@@ -169,7 +174,7 @@ class IRDAIProductsScraper:
         # 4. Scan all pagination links and find the one after the active/current
         pager = soup.find(["ul", "div", "nav"], class_=re.compile(r'pag(e|ination|er)', re.I))
         if pager:
-            links = pager.find_all("a", href=True)
+            links = [a for a in pager.find_all("a", href=True) if _valid(a.get("href", ""))]
             active = pager.find(["span", "li", "a"], class_=re.compile(r'active|current|selected', re.I))
             if active and links:
                 try:
@@ -177,7 +182,7 @@ class IRDAIProductsScraper:
                     for i, a in enumerate(links):
                         if a.get_text(strip=True) == active_txt and i + 1 < len(links):
                             href = links[i + 1].get("href", "")
-                            if href and href != "#":
+                            if _valid(href):
                                 return urljoin(base, href)
                 except Exception:
                     pass
@@ -306,6 +311,124 @@ class IRDAIProductsScraper:
 
         return products
 
+    def _find_xlsx_links(self, soup: BeautifulSoup, base_url: str) -> List[Tuple[str, str]]:
+        links = []
+        table = soup.find("table")
+        if table:
+            for tr in table.find_all("tr")[1:]:
+                tds = tr.find_all(["td", "th"])
+                ins_name = clean_english_text(tds[2].get_text(strip=True)) if len(tds) > 2 else ""
+                for a in tr.find_all("a", href=True):
+                    href = a["href"]
+                    if ".xlsx" in href.lower() or ".xls" in href.lower():
+                        full_url = urljoin(base_url, href)
+                        links.append((ins_name, full_url))
+                        break
+        if not links:
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if ".xlsx" in href.lower() or ".xls" in href.lower():
+                    ins_name = clean_english_text(a.get_text(strip=True))
+                    links.append((ins_name, urljoin(base_url, href)))
+        return links
+
+    def _parse_xlsx_products(self, xlsx_bytes: bytes, default_insurer: str = "") -> List[Dict]:
+        """
+        Parses products from an IRDAI Excel spreadsheet (.xlsx).
+        Zero external dependencies: reads OpenXML worksheets directly.
+        """
+        products = []
+        try:
+            z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+            namelist = z.namelist()
+            if "xl/sharedStrings.xml" not in namelist or "xl/worksheets/sheet1.xml" not in namelist:
+                return []
+
+            shared_xml = z.read("xl/sharedStrings.xml")
+            tree = ET.fromstring(shared_xml)
+            strings = []
+            for si in tree.findall("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}si"):
+                t_nodes = si.findall(".//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t")
+                strings.append("".join(t.text or "" for t in t_nodes))
+
+            sheet_xml = z.read("xl/worksheets/sheet1.xml")
+            sheet_tree = ET.fromstring(sheet_xml)
+            ns = {"ns": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+            for row in sheet_tree.findall(".//ns:row", ns):
+                row_vals = []
+                for c in row.findall("ns:c", ns):
+                    v = c.find("ns:v", ns)
+                    t_attr = c.get("t")
+                    if v is not None and v.text is not None:
+                        if t_attr == "s" and v.text.isdigit():
+                            idx = int(v.text)
+                            row_vals.append(strings[idx] if idx < len(strings) else "")
+                        else:
+                            row_vals.append(v.text)
+                    else:
+                        row_vals.append("")
+
+                uin = None
+                uin_col_idx = -1
+                for i, val in enumerate(row_vals):
+                    candidate = self._parse_uin(val)
+                    if candidate:
+                        uin = candidate
+                        uin_col_idx = i
+                        break
+
+                if not uin:
+                    continue
+
+                insurer_name = default_insurer
+                for val in row_vals:
+                    val_lower = val.lower()
+                    if any(term in val_lower for term in ("insurance", "life", "assurance", "ltd", "co.")):
+                        candidate_ins = clean_english_text(val)
+                        if len(candidate_ins) > 5 and not self._parse_uin(val):
+                            insurer_name = candidate_ins
+                            break
+
+                product_name = ""
+                if uin_col_idx > 0:
+                    candidate = clean_english_text(row_vals[uin_col_idx - 1])
+                    if len(candidate) > 3 and not self._parse_uin(candidate):
+                        product_name = candidate
+
+                if not product_name:
+                    candidates = [
+                        clean_english_text(v) for v in row_vals
+                        if len(v) > 3 and not self._parse_uin(v) and v != insurer_name
+                    ]
+                    product_name = max(candidates, key=len) if candidates else uin
+
+                category = self._classify_category(product_name)
+
+                status = "ACTIVE"
+                row_text = " ".join(row_vals).upper()
+                if "WITHDRAW" in row_text or "प्रत्याहृत" in row_text or "LAPSE" in row_text:
+                    status = "WITHDRAWN"
+
+                launch_date = None
+                for val in row_vals:
+                    d = self._parse_date(val)
+                    if d:
+                        launch_date = d
+                        break
+
+                products.append({
+                    "uin": uin,
+                    "product_name": product_name,
+                    "insurer_name": insurer_name,
+                    "category": category,
+                    "status": status,
+                    "launch_date": launch_date,
+                })
+        except Exception as e:
+            logger.debug("Error parsing XLSX products: %s", e)
+        return products
+
     def _scrape_irdai_primary(self, base_url: str) -> Generator[Dict, None, None]:
         """
         Paginate through the IRDAI life products list and yield product dicts.
@@ -321,22 +444,40 @@ class IRDAIProductsScraper:
                 logger.warning("Could not fetch page %d; stopping pagination.", page_num)
                 break
 
-            products = self._parse_irdai_table(soup)
-            if not products:
-                logger.info("No products found on page %d; ending pagination.", page_num)
-                break
-
             new_on_page = 0
-            for p in products:
-                if p["uin"] not in seen_uins:
-                    seen_uins.add(p["uin"])
-                    new_on_page += 1
-                    yield p
+            products = self._parse_irdai_table(soup)
+            if products:
+                for p in products:
+                    if p["uin"] not in seen_uins:
+                        seen_uins.add(p["uin"])
+                        new_on_page += 1
+                        yield p
+            else:
+                xlsx_links = self._find_xlsx_links(soup, url)
+                if xlsx_links:
+                    logger.info("Found %d insurer spreadsheets on IRDAI portal.", len(xlsx_links))
+                    for insurer_name, link in xlsx_links:
+                        try:
+                            resp = self.session.get(link, timeout=30)
+                            if resp.status_code == 200:
+                                parsed_items = self._parse_xlsx_products(resp.content, default_insurer=insurer_name)
+                                count_from_file = 0
+                                for p in parsed_items:
+                                    if p["uin"] not in seen_uins:
+                                        seen_uins.add(p["uin"])
+                                        new_on_page += 1
+                                        count_from_file += 1
+                                        yield p
+                                logger.info("Scraped %d products for %s.", count_from_file, insurer_name)
+                        except Exception as e:
+                            logger.warning("Failed to fetch spreadsheet for %s: %s", insurer_name, e)
+                else:
+                    logger.info("No products or spreadsheets found on page %d; ending pagination.", page_num)
+                    break
 
             logger.info("Page %d: %d new products (total seen: %d).", page_num, new_on_page, len(seen_uins))
 
             if new_on_page == 0:
-                # All products on this page were already seen — stop pagination
                 break
 
             next_url = self._find_next_page_url(soup, url)
@@ -420,21 +561,28 @@ class IRDAIProductsScraper:
         """
         Main generator: yields product dicts from IRDAI life products registry.
 
-        Tries primary URL first, then alt URL, then Life Council fallback.
+        Tries primary URL first, then portlet query URL, then alt URL, then Life Council fallback.
         Fields per product:
             uin, product_name, insurer_name, category, status, launch_date
         """
         primary_yielded = 0
 
-        # Try primary URL
-        for product in self._scrape_irdai_primary(IRDAI_LIFE_PRODUCTS_LIST_URL):
+        # Try IRDAI Document Media portlet URL first (contains all 27 insurer files)
+        for product in self._scrape_irdai_primary(IRDAI_LIFE_PRODUCTS_URL):
             primary_yielded += 1
             yield product
+
+        # Try basic list URL if portlet yielded nothing
+        if primary_yielded == 0:
+            logger.info("Trying IRDAI list URL: %s", IRDAI_LIFE_PRODUCTS_LIST_URL)
+            for product in self._scrape_irdai_primary(IRDAI_LIFE_PRODUCTS_LIST_URL):
+                primary_yielded += 1
+                yield product
 
         # Try alternate URL if primary yielded nothing
         if primary_yielded == 0:
             logger.info(
-                "Primary IRDAI URL yielded 0 products; trying alternate URL: %s",
+                "Primary IRDAI URLs yielded 0 products; trying alternate URL: %s",
                 IRDAI_LIFE_PRODUCTS_ALT_URL,
             )
             for product in self._scrape_irdai_primary(IRDAI_LIFE_PRODUCTS_ALT_URL):
@@ -444,6 +592,6 @@ class IRDAIProductsScraper:
         # Fallback to Life Insurance Council if IRDAI scrape failed
         if primary_yielded == 0:
             logger.warning(
-                "Both IRDAI URLs yielded 0 products. Falling back to Life Insurance Council."
+                "All IRDAI URLs yielded 0 products. Falling back to Life Insurance Council."
             )
             yield from self._scrape_life_council_fallback()
