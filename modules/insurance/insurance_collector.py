@@ -1,23 +1,19 @@
 """
 modules/insurance/insurance_collector.py
-Orchestrates IRDAI life insurance product ingestion into SQLite and JSON output.
+Orchestrates IRDAI life insurance product ingestion into SQLite database.
 """
-import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict
 
-from core.config import DATA_DIR
 from core.database import register_schema_documentation, transaction
 from core.schemas import SCHEMA_INSURANCE_PRODUCTS
 from core.text_utils import clean_english_text
 from modules.insurance.irdai_products_scraper import IRDAIProductsScraper
 
 logger = logging.getLogger(__name__)
-
-JSON_OUTPUT_PATH = DATA_DIR / "insurance_products.json"
 
 
 def init_insurance_schema(conn: sqlite3.Connection):
@@ -66,14 +62,13 @@ def _build_searchable_name(insurer: str, product: str) -> str:
 
 def sync_insurance_products(conn: sqlite3.Connection) -> int:
     """
-    Scrapes IRDAI insurance products and writes to SQLite + JSON.
+    Scrapes IRDAI insurance products and writes to SQLite database.
     Returns count of products synced.
     """
     init_insurance_schema(conn)
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
     scraper = IRDAIProductsScraper()
-    products: List[Dict] = []
     batch = []
     count = 0
 
@@ -89,17 +84,6 @@ def sync_insurance_products(conn: sqlite3.Connection) -> int:
         status = item.get("status", "ACTIVE")
         launch_date = item.get("launch_date")
 
-        record = {
-            "uin": uin,
-            "product_name": product_name,
-            "name": name,
-            "insurer_name": insurer_name,
-            "category": category,
-            "status": status,
-            "launch_date": launch_date,
-            "updated_at": now_iso,
-        }
-        products.append(record)
         batch.append((
             uin, product_name, name, insurer_name, category, status, launch_date, now_iso
         ))
@@ -113,17 +97,7 @@ def sync_insurance_products(conn: sqlite3.Connection) -> int:
         _upsert_batch(conn, batch)
         count += len(batch)
 
-    # Write JSON output
-    JSON_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(JSON_OUTPUT_PATH, "w", encoding="utf-8") as f:
-        json.dump({
-            "source": "IRDAI Life Products Registry",
-            "generated_at": now_iso,
-            "total_products": count,
-            "products": products,
-        }, f, indent=2, ensure_ascii=False)
-
-    logger.info("Synced %d IRDAI insurance products to SQLite and %s.", count, JSON_OUTPUT_PATH)
+    logger.info("Synced %d IRDAI insurance products to master_insurance_products in SQLite.", count)
     return count
 
 
