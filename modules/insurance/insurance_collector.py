@@ -10,7 +10,13 @@ from typing import List, Dict
 
 from core.database import register_schema_documentation, transaction
 from core.schemas import SCHEMA_INSURANCE_PRODUCTS
-from core.text_utils import clean_english_text
+from core.text_utils import (
+    build_canonical_insurance_name,
+    clean_company_name,
+    clean_english_text,
+    strip_punctuation_prefix,
+    strip_trailing_punctuation,
+)
 from modules.insurance.irdai_products_scraper import IRDAIProductsScraper
 
 logger = logging.getLogger(__name__)
@@ -39,25 +45,8 @@ def init_insurance_schema(conn: sqlite3.Connection):
 
 
 def _build_searchable_name(insurer: str, product: str) -> str:
-    """Builds a canonical searchable name: 'InsurerBrand - ProductName'."""
-    brand = clean_english_text(insurer or "")
-    for suffix in (
-        " Insurance Company Limited", " Insurance Co. Ltd.", " Life Insurance Limited",
-        " Life Insurance Company Limited", " Company Limited", " Insurance Limited",
-        " Corporation of India", " Co Ltd", " Limited", " Ltd"
-    ):
-        if suffix in brand:
-            brand = brand.replace(suffix, "")
-            break
-    brand = brand.strip()
-    if insurer and "Life Insurance Corporation" in insurer:
-        brand = "LIC"
-    prod = clean_english_text(product or "")
-    if not brand:
-        return prod
-    if prod.lower().startswith(brand.lower()):
-        return prod
-    return f"{brand} - {prod}"
+    """Builds clean canonical format: '<Insurer Clean Name> - <Product Marketing Name>'."""
+    return build_canonical_insurance_name(insurer, product)
 
 
 def sync_insurance_products(conn: sqlite3.Connection) -> int:
@@ -77,9 +66,9 @@ def sync_insurance_products(conn: sqlite3.Connection) -> int:
         if not uin:
             continue
 
-        product_name = clean_english_text(item.get("product_name", ""))
-        insurer_name = clean_english_text(item.get("insurer_name", ""))
-        name = _build_searchable_name(insurer_name, product_name)
+        product_name = strip_trailing_punctuation(strip_punctuation_prefix(clean_english_text(item.get("product_name", ""))))
+        insurer_name = clean_company_name(item.get("insurer_name", ""))
+        name = build_canonical_insurance_name(insurer_name, product_name)
         category = item.get("category", "Other")
         status = item.get("status", "ACTIVE")
         launch_date = item.get("launch_date")

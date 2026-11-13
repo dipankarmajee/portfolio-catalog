@@ -23,6 +23,42 @@ class TestTextUtils(unittest.TestCase):
         cleaned = clean_english_text(sample)
         self.assertEqual(cleaned, "Axis Bluechip Fund - Direct Plan")
 
+    def test_strip_punctuation_prefix_and_trailing(self):
+        from core.text_utils import strip_punctuation_prefix, strip_trailing_punctuation
+        self.assertEqual(strip_punctuation_prefix("./ Kotak Ace"), "Kotak Ace")
+        self.assertEqual(strip_punctuation_prefix(".\\ Star Union"), "Star Union")
+        self.assertEqual(strip_punctuation_prefix("/ HDFC"), "HDFC")
+        self.assertEqual(strip_trailing_punctuation("Kotak Mahindra Life Insurance Company."), "Kotak Mahindra Life Insurance Company")
+
+    def test_clean_company_name_and_canonical_insurance_name(self):
+        from core.text_utils import clean_company_name, build_canonical_insurance_name
+        self.assertEqual(
+            clean_company_name(". / Kotak Mahindra Life Insurance Company Ltd."),
+            "Kotak Mahindra Life Insurance Co. Ltd."
+        )
+        self.assertEqual(
+            clean_company_name("Kotak Mahindra Life Insurance Company."),
+            "Kotak Mahindra Life Insurance Co. Ltd."
+        )
+        self.assertEqual(
+            clean_company_name("Go Digit Life Insurance Limited."),
+            "Go Digit Life Insurance Limited"
+        )
+        self.assertEqual(
+            build_canonical_insurance_name(
+                ". / Kotak Mahindra Life Insurance Company Ltd.",
+                "Kotak Ace Investment"
+            ),
+            "Kotak Mahindra Life - Kotak Ace Investment"
+        )
+        self.assertEqual(
+            build_canonical_insurance_name(
+                ". / Star Union Dai-ichi Life Insurance Co Ltd.",
+                "SUD Life Group Term Insurance Scheme"
+            ),
+            "Star Union Dai-ichi Life - SUD Life Group Term Insurance Scheme"
+        )
+
     def test_has_devanagari(self):
         self.assertTrue(has_devanagari("एचडीएफसी बैंक"))
         self.assertFalse(has_devanagari("HDFC Bank Limited"))

@@ -23,7 +23,14 @@ from core.constants import (
 from core.database import register_schema_documentation, transaction
 from core.enums import InstrumentStatus, InsurerCategory, UlipCategory, UlipFundType
 from core.schemas import SCHEMA_INSURERS, SCHEMA_ULIPS
-from core.text_utils import clean_corporate_tokens, clean_english_text
+from core.text_utils import (
+    build_canonical_insurance_name,
+    clean_company_name,
+    clean_corporate_tokens,
+    clean_english_text,
+    strip_punctuation_prefix,
+    strip_trailing_punctuation,
+)
 from modules.ulips.analytics import update_ulip_price_analytics
 from modules.ulips.irdai_entities import IRDAIEntityScraper
 from modules.ulips.life_council import LifeCouncilScraper
@@ -33,30 +40,10 @@ logger = logging.getLogger(__name__)
 
 def format_ulip_search_name(insurer_name: str, fund_name: str) -> str:
     """
-    Builds a canonical, search-friendly display title for the ULIP fund (e.g. 'SBI Life - Equity Fund').
+    Builds clean canonical display title: '<Insurer Clean Name> - <Fund Marketing Name>'.
     Ensures client apps searching for the insurer name or fund title match seamlessly.
     """
-    clean_fund = clean_english_text(fund_name).strip()
-    if clean_fund.isupper():
-        clean_fund = clean_fund.title()
-    brand = insurer_name or ""
-    for suffix in (
-        " Insurance Company Limited", " Insurance Co. Ltd.", " Life Insurance Limited",
-        " Life Insurance Company Limited", " Company Limited", " Insurance Limited",
-        " Corporation of India", " Co Ltd", " Limited", " Ltd"
-    ):
-        if suffix in brand:
-            brand = brand.replace(suffix, "")
-            break
-    brand = brand.strip()
-    if "Life Insurance Corporation" in (insurer_name or ""):
-        brand = "LIC"
-
-    if not brand:
-        return clean_fund
-    if clean_fund.lower().startswith(brand.lower()):
-        return clean_fund
-    return f"{brand} - {clean_fund}"
+    return build_canonical_insurance_name(insurer_name, fund_name)
 
 
 def init_ulips_schema(conn: sqlite3.Connection):
@@ -214,7 +201,7 @@ def sync_insurers_ulips(conn: sqlite3.Connection) -> int:
     ins_rows = []
     for item in irdai_scraper.scrape_life_insurers():
         reg = item["reg_number"] or "0"
-        name = clean_english_text(item["insurer_name"])
+        name = clean_company_name(item["insurer_name"])
         ins_rows.append((
             f"INS_{reg}", name, name, reg, InsurerCategory.LIFE_INSURERS.value,
             item["website"], item["source_url"], InstrumentStatus.ACTIVE.value, now_iso
@@ -282,8 +269,8 @@ def sync_insurers_ulips(conn: sqlite3.Connection) -> int:
             continue
 
         insurer_id, insurer_name = ins_tuple
-        clean_name = clean_english_text(fund["fund_name"])
-        search_name = format_ulip_search_name(insurer_name, clean_name)
+        clean_name = strip_trailing_punctuation(strip_punctuation_prefix(clean_english_text(fund["fund_name"])))
+        search_name = build_canonical_insurance_name(insurer_name, clean_name)
         category, fund_type = classify_ulip_fund(sfin, clean_name)
         inception_date = extract_inception_date_from_sfin(sfin)
         nav = fund.get("latest_nav")

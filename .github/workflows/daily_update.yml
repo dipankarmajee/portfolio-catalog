@@ -10,12 +10,8 @@ on:
       - 'data/**'
       - 'documentation/**'
   schedule:
-    # Runs every 6 hours, everyday:
-    # - 05:35 AM IST (00:05 UTC)
-    # - 11:35 AM IST (06:05 UTC)
-    # - 05:35 PM IST (12:05 UTC) - captures NSE market close
-    # - 11:35 PM IST (18:05 UTC) - captures AMFI daily NAV releases
-    - cron: '5 0,6,12,18 * * *'
+    # Runs every 2 hours:
+    - cron: '5 */2 * * *'
   workflow_dispatch:
 
 permissions:
