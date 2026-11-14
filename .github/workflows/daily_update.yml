@@ -10,8 +10,10 @@ on:
       - 'data/**'
       - 'documentation/**'
   schedule:
-    # Runs every 2 hours:
-    - cron: '5 */2 * * *'
+    # Runs twice a day (every 12 hours):
+    # 00:30 UTC = 06:00 AM IST (captures overnight AMFI mutual fund NAVs & pre-market updates)
+    # 12:30 UTC = 06:00 PM IST (captures post-NSE/BSE market closing prices)
+    - cron: '30 0,12 * * *'
   workflow_dispatch:
 
 permissions:
