@@ -24,6 +24,7 @@ from modules.crypto.crypto_collector import sync_crypto
 from modules.equities.nse_collector import sync_nse_equities
 from modules.equities.sec_edgar_collector import sync_sec_edgar_equities
 from modules.fixed_income.fixed_income_collector import sync_fixed_income
+from modules.fixed_income.sgb_collector import sync_sgb_tranches
 from modules.mutual_funds.amfi_collector import sync_amfi_mutual_funds
 from modules.nps.nps_collector import sync_nps
 from modules.ulips.ulip_collector import sync_insurers_ulips
@@ -64,6 +65,8 @@ def run_fixed_income():
     try:
         fi_count = sync_fixed_income(conn)
         logger.info("Fixed Income Complete: %d statutory schemes.", fi_count)
+        sgb_count = sync_sgb_tranches(conn)
+        logger.info("SGB Tranches Complete: %d tranches synced.", sgb_count)
     finally:
         conn.close()
 
@@ -185,7 +188,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="Run full pipeline across all asset classes")
     parser.add_argument(
         "--module",
-        choices=["equities", "mutual_funds", "fixed_income", "nps", "commodities", "crypto", "ulips", "insurance_products"],
+        choices=["equities", "mutual_funds", "fixed_income", "sgb", "nps", "commodities", "crypto", "ulips", "insurance_products"],
         help="Run a specific asset module"
     )
     parser.add_argument("--docs", action="store_true", help="Regenerate schema documentation only")
@@ -201,6 +204,7 @@ def main():
             "equities": run_equities,
             "mutual_funds": run_mutual_funds,
             "fixed_income": run_fixed_income,
+            "sgb": run_fixed_income,
             "nps": run_nps,
             "commodities": run_commodities,
             "crypto": run_crypto,

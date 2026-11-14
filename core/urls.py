@@ -49,7 +49,7 @@ IRDAI_LIFE_PRODUCTS_LIST_URL = "https://irdai.gov.in/list-of-life-products"
 IRDAI_LIFE_PRODUCTS_ALT_URL = "https://irdai.gov.in/web/guest/list-of-life-products"
 LIFE_COUNCIL_UIN_URL = "https://www.lifeinscouncil.org/industry%20information/product_of_life_insurers.aspx"
 
-# Fixed Income (Indian Small Savings, US Treasuries, RBI Policy Rates)
+# Fixed Income (Indian Small Savings, US Treasuries, RBI Policy Rates, SGBs)
 NSI_PORTAL_ROOT = "https://www.nsiindia.gov.in"
 NSI_SCHEMES_RATES_URL = "https://www.nsiindia.gov.in/InternalPage.aspx?Id_Pk=132"
 NSI_SCHEMES_OVERVIEW_URL = "https://www.nsiindia.gov.in/InternalPage.aspx?Id_Pk=27"
@@ -58,3 +58,5 @@ US_TREASURY_YIELD_CURVE_URL = (
     "?data=daily_treasury_yield_curve&field_tdr_date_value={year}"
 )
 RBI_HOME_URL = "https://www.rbi.org.in/"
+NSE_SGB_API_URL = "https://www.nseindia.com/api/sovereign-gold-bonds"
+BSE_SGB_API_URL = "https://api.bseindia.com/BseIndiaAPI/api/SgbMaster/w"

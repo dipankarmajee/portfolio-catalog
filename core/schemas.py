@@ -159,3 +159,20 @@ SCHEMA_ULIPS = [
     ("status", "TEXT", 0, "Fund status (ACTIVE, CLOSED)"),
     ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
 ]
+
+SCHEMA_SGB_TRANCHES = [
+    ("uid", "TEXT", 1, "Unique primary key: SGB_{symbol}"),
+    ("symbol", "TEXT", 0, "Official exchange trading symbol (e.g. SGBFEB32IV)"),
+    ("name", "TEXT", 0, "Clean canonical series name (e.g. SGB 2023-24 Series IV)"),
+    ("series", "TEXT", 0, "Extracted tranche series identifier (e.g. Series IV)"),
+    ("issue_date", "TEXT", 0, "Issue date in ISO format (YYYY-MM-DD)"),
+    ("maturity_date", "TEXT", 0, "Statutory maturity date in ISO format (YYYY-MM-DD, 8 years from issue)"),
+    ("issue_price", "REAL", 0, "Nominal/issue price per gram in INR"),
+    ("coupon_rate", "REAL", 0, "Statutory annual coupon interest percentage (2.50% p.a.)"),
+    ("coupon_months", "TEXT", 0, "Semi-annual payout months based on issue month (e.g. '2,8')"),
+    ("coupon_day", "INTEGER", 0, "Day of month for semi-annual interest credit"),
+    ("latest_price", "REAL", 0, "Latest traded price per gram in INR (if available)"),
+    ("price_date", "TEXT", 0, "Price valuation date (YYYY-MM-DD)"),
+    ("status", "TEXT", 0, "Tranche status (ACTIVE, REDEEMED)"),
+    ("updated_at", "TEXT", 0, "Pipeline sync UTC timestamp (ISO 8601)"),
+]
